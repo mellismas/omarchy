@@ -1,0 +1,78 @@
+#!/bin/bash
+
+# omarchy:summary=Set up face authentication for the lock screen
+# omarchy:requires-sudo=true
+
+set -e
+
+# Enrolment is for the invoking user. Under sudo, $USER is root, which would
+# enrol root and leave the real user's templates behind on removal.
+if (( EUID == 0 )); then
+  echo "Run omarchy-setup-security-face as your user, not under sudo (it asks for sudo where needed)." >&2
+  exit 1
+fi
+target_user=$USER
+
+# The lock screen's face stack is its own PAM service beside the password and
+# fingerprint ones, so it takes no prompt: looking at the machine is the act.
+# It must be closed by pam_deny: the password is a separate service on its own
+# lane, and a stack whose only module answered "ignore" would carry no verdict
+# at all, which PAM reads as success.
+setup_lock_face_pam() {
+  echo "Configuring lock screen for face authentication..."
+  sudo tee /etc/pam.d/omarchy-lock-face >/dev/null <<'EOT'
+#%PAM-1.0
+auth       sufficient                  pam_faceauth.so socket=/run/faceauth/sock timeout=8
+auth       required                    pam_deny.so
+account    include                     system-local-login
+EOT
+}
+
+
+echo -e "\e[32mSetting up face authentication.\n\e[0m"
+
+if ! omarchy-hw-ir-camera; then
+  echo -e "\e[31mNo infrared camera detected.\e[0m"
+  echo "Face authentication needs an IR sensor (the kind Windows Hello uses)."
+  echo "A colour webcam is deliberately not enough: it cannot see in the dark and is easy to fool with a photo."
+  echo "If you have one that was not detected, put its /dev/video path in ~/.config/omarchy/ir-camera and run this again."
+  exit 1
+fi
+
+echo "Infrared camera:"
+omarchy-hw-ir-camera-list | sed 's/^/  /'
+echo
+
+if omarchy-pkg-missing omarchy-faceauth; then
+  echo "Installing face authentication..."
+  omarchy-pkg-add omarchy-faceauth
+fi
+
+echo "Fetching and verifying the recognition models (about 260 MB, once)..."
+sudo faceauth models fetch
+
+echo "Starting the face authentication service..."
+sudo systemctl enable --now faceauth.service
+
+# Enrol before touching PAM, and wire PAM only after a verification succeeds:
+# a stack pointed at a module with nothing to match would be wrong twice.
+echo -e "\e[32m\nLet's enrol your face. Look at the camera and move your head a little.\e[0m"
+echo "Your templates are numbers derived from your face, never images, stored root-only."
+echo -e "On a machine with a TPM they are sealed to it; without one they are plaintext, and 'faceauth doctor' says which.\n"
+
+# Enrolment changes who can unlock the machine, so the daemon takes it only
+# from root: sudo here is the password standing behind it.
+if sudo faceauth enroll --user "$target_user"; then
+  echo -e "\nNow let's verify it works.\n"
+  if faceauth auth --user "$target_user" | grep -q '^{"result":"match"'; then
+    setup_lock_face_pam
+    echo -e "\e[32m\nFace authentication is set up. Lock the screen and look at the camera.\e[0m"
+    echo "Run 'faceauth doctor' any time to see the state of every part."
+  else
+    echo -e "\e[31m\nVerification failed. Enrolment is kept; try 'faceauth auth' facing the camera, then run this again.\e[0m"
+    exit 1
+  fi
+else
+  echo -e "\e[31m\nEnrolment failed. Please try again.\e[0m"
+  exit 1
+fi

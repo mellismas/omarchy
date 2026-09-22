@@ -10,6 +10,11 @@ Item {
   property string videoPosterPath: ""
   property int backgroundVersion: 0
   property bool fingerprintConfigured: false
+  // Face authentication: whether it is set up, and what it is doing right now:
+  // "scanning" (an attempt is running), "probing" (panel blank, watching for a
+  // face), "idle" (set up, between attempts) or "".
+  property bool faceConfigured: false
+  property string faceState: ""
   property bool authenticatingPassword: false
   property string failureMessage: ""
   property int failedAttempts: 0
@@ -33,6 +38,8 @@ Item {
   // Space to keep clear on each side of the field for the fingerprint icon
   // (icon width plus a gap) so the centered dots never run under it.
   readonly property real fingerprintReserve: fingerprintConfigured ? Math.round(fingerprintIcon.implicitWidth + 12) : 0
+  readonly property real faceReserve: faceConfigured ? Math.round(faceIcon.implicitWidth + 12) : 0
+  readonly property real sideReserve: Math.max(fingerprintReserve, faceReserve)
   // Shrink the dots to fit once the password outgrows the field, so every
   // keystroke stays visible — otherwise long passwords clip with no feedback.
   readonly property real passwordDotScale: dotMetrics.advanceWidth > 0
@@ -135,6 +142,7 @@ Item {
       onPositionChanged: root.wakeRequested()
     }
 
+
     BorderSurface {
       id: inputField
       width: root.fieldWidth
@@ -151,9 +159,9 @@ Item {
         anchors.topMargin: inputField.borderTop
         // Reserve the fingerprint icon's width on both sides so the centered
         // dots stay symmetric and never slide under the icon as they grow.
-        anchors.rightMargin: inputField.borderRight + 18 + root.fingerprintReserve
+        anchors.rightMargin: inputField.borderRight + 18 + root.sideReserve
         anchors.bottomMargin: inputField.borderBottom
-        anchors.leftMargin: inputField.borderLeft + 18 + root.fingerprintReserve
+        anchors.leftMargin: inputField.borderLeft + 18 + root.sideReserve
         verticalAlignment: TextInput.AlignVCenter
         horizontalAlignment: TextInput.AlignHCenter
         activeFocusOnPress: true
@@ -211,6 +219,32 @@ Item {
         horizontalAlignment: Text.AlignHCenter
         verticalAlignment: Text.AlignVCenter
         elide: Text.ElideRight
+      }
+
+      // Face hint inside the field's left edge when face authentication is set
+      // up. It pulses while a scan runs, dims while the panel is blank and only
+      // the probe watches, and sits steady between attempts.
+      Text {
+        id: faceIcon
+        objectName: "faceIndicator"
+        anchors.left: parent.left
+        anchors.leftMargin: inputField.borderLeft + 18
+        anchors.verticalCenter: parent.verticalCenter
+        visible: root.faceConfigured
+        text: "󰙃"
+        color: root.faceState === "scanning" ? Color.lock.borderActive : Color.lock.placeholder
+        opacity: root.faceState === "probing" ? 0.45 : 1.0
+        font.family: Style.font.family
+        font.pixelSize: Math.round(root.fieldFontSize * 1.1)
+        horizontalAlignment: Text.AlignHCenter
+        verticalAlignment: Text.AlignVCenter
+
+        SequentialAnimation on opacity {
+          running: root.faceState === "scanning"
+          loops: Animation.Infinite
+          NumberAnimation { to: 0.35; duration: 500; easing.type: Easing.InOutSine }
+          NumberAnimation { to: 1.0; duration: 500; easing.type: Easing.InOutSine }
+        }
       }
 
       // Fingerprint hint pinned inside the field's right edge when a sensor is

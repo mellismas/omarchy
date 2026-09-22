@@ -1,0 +1,50 @@
+#!/bin/bash
+
+# omarchy:summary=Remove face authentication from the lock screen
+# omarchy:args=[--keep-templates]
+# omarchy:requires-sudo=true
+
+set -e
+
+keep_templates=0
+for arg in "$@"; do
+  case $arg in
+    --keep-templates) keep_templates=1 ;;
+    *)
+      echo "Usage: omarchy remove security face [--keep-templates]" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if (( EUID == 0 )); then
+  echo "Run omarchy-remove-security-face as your user, not under sudo (it asks for sudo where needed)." >&2
+  exit 1
+fi
+target_user=$USER
+
+echo -e "\e[32mRemoving face authentication.\n\e[0m"
+
+# PAM first, whatever else is chosen: dropping the module while a stack
+# references it would leave that stack unable to authenticate.
+if [[ -f /etc/pam.d/omarchy-lock-face ]]; then
+  echo "Removing lock screen face authentication..."
+  sudo rm -f /etc/pam.d/omarchy-lock-face
+fi
+
+if (( keep_templates )); then
+  echo "Keeping the enrolled templates in /var/lib/faceauth (root-only)."
+else
+  echo "Deleting the enrolled templates..."
+  if systemctl is-active --quiet faceauth.service; then
+    sudo faceauth templates delete --user "$target_user" >/dev/null || true
+  fi
+fi
+
+echo "Stopping the face authentication service..."
+sudo systemctl disable --now faceauth.service 2>/dev/null || true
+
+echo "Removing the face authentication package..."
+omarchy-pkg-drop omarchy-faceauth
+
+echo -e "\e[32mFace authentication has been removed.\e[0m"
