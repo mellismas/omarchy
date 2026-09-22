@@ -198,14 +198,14 @@ Item {
 
         Text {
           width: parent.width
+          // The whole command, wrapped, never cut: the daemon caps it at 300
+          // characters, so this is a few lines at most.
           text: String((root.caller || {}).command || "")
           textFormat: Text.PlainText
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
-          wrapMode: Text.Wrap
-          maximumLineCount: 3
-          elide: Text.ElideRight
+          wrapMode: Text.WrapAtWordBoundaryOrAnywhere
         }
 
         Text {
@@ -224,7 +224,7 @@ Item {
         Text {
           width: parent.width
           visible: root.claim.length > 0
-          text: "Requester says: " + root.claim + " (not verified)"
+          text: "Unverified, requester says: " + root.claim
           textFormat: Text.PlainText
           color: root.foreground
           opacity: 0.6

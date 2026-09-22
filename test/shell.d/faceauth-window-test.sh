@@ -24,8 +24,8 @@ assert(commands.length >= 2, 'the consent window spawns processes', String(comma
 assert(commands.every(c => c === '/usr/bin/faceauth' || c === '/usr/bin/kill'), 'every spawned binary is /usr/bin/faceauth or /usr/bin/kill', String(commands))
 
 assert(/text: String\(\(root\.caller \|\| \{\}\)\.command \|\| ""\)/.test(consent), 'the prominent line shows the command the daemon derived')
-assert(/text: "Requester says: " \+ root\.claim \+ " \(not verified\)"/.test(consent), 'the requester claim is labelled as unverified')
-const claimBlock = consent.match(/text: "Requester says: "[\s\S]*?font\.pixelSize: ([\w.]+)/)
+assert(/text: "Unverified, requester says: " \+ root\.claim/.test(consent), "the requester claim is labelled unverified before the text, so elision cannot hide the label")
+const claimBlock = consent.match(/text: "Unverified, requester says: "[\s\S]*?font\.pixelSize: ([\w.]+)/)
 assertEqual(claimBlock && claimBlock[1], 'Style.font.caption', 'the requester claim is caption-sized')
 // Each Text block, cut at its own font size, so a claim can only be seen
 // beside the size it is drawn at.
