@@ -15,3 +15,13 @@ You can remove the fingerprint authentication under _Remove > Security > Fingerp
 If you're using a Fido2 device, you can set it up for `sudo` authentication using _Setup > Security > Fido2_ in the Omarchy menu (`Super + Space`). It covers `sudo` and system authorization prompts, though, not unlocking your computer.
 
 You can remove the fido2 authentication under _Remove > Security > Fido2_ in the Omarchy menu.
+
+### Face authentication
+
+If your laptop has an infrared camera, the kind Windows Hello uses, you can unlock the lock screen by looking at it. Run _Setup > Security > Face_ in the Omarchy menu (`Super + Space`); the entry only appears when an IR camera is detected. That'll install the face authentication package, fetch its recognition models, enrol your face, verify it, and you'll be set to go: lock the screen (`Super + Ctrl + L`), look at the camera, and it opens.
+
+A colour webcam won't do, on purpose: it can't see in the dark and a photo fools it. The IR camera never even sees a phone as a face, and a paper print is refused by how differently paper and skin reflect the camera's own light. What it can't tell apart is a look-alike or a 3D mask, so keep a strong password behind it; every failure, from a covered camera to a stopped service, falls back to the password.
+
+Your enrolment is a set of numbers derived from your face, never images, kept root-only and sealed to the TPM when the machine has one. To enrol another look later, glasses or a beard, use _Setup > Security > Face: Add Look_. `faceauth doctor` reports the state of every part.
+
+You can remove face authentication under _Remove > Security > Face_ in the Omarchy menu.
