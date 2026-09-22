@@ -196,10 +196,12 @@ tee_line=$(grep -n $'sudo\ttee' "$calls" | head -1 | cut -d: -f1)
 grep -q $'omarchy-pkg-add\tomarchy-faceauth' "$calls" || fail "setup installs the package" "$(cat "$calls")"
 grep -q $'faceauth\tmodels\tfetch' "$calls" || fail "setup fetches the models" "$(cat "$calls")"
 grep -q 'pam_faceauth.so socket=/run/faceauth/sock consent' "$pamd/sudo" || fail "setup puts a consent line on the sudo stack" "$(cat "$pamd/sudo")"
+grep -q '^auth      sufficient pam_faceauth.so' "$pamd/sudo" || fail "the sudo consent line is sufficient: a shake falls to the terminal prompt" "$(cat "$pamd/sudo")"
 [[ $(head -1 "$pamd/sudo") == *pam_faceauth.so* ]] || fail "the consent line is the first line of the sudo stack"
 [[ -f $backups/sudo.pre-face ]] || fail "setup backs up the sudo stack before changing it"
 [[ -f $pamd/polkit-1 && -f $backups/polkit-1.created-by-faceauth ]] || fail "setup creates polkit-1 when absent and remembers that it did"
 grep -q 'pam_faceauth.so' "$pamd/polkit-1" || fail "the created polkit-1 carries the consent line"
+grep -q '^auth      \[success=done auth_err=die default=ignore\] pam_faceauth.so' "$pamd/polkit-1" || fail "the polkit consent line ends the stack on the user's no so the agent can cancel" "$(cat "$pamd/polkit-1")"
 grep -q $'faceauth\tcalibrate' "$calls" || fail "setup records the person's gestures" "$(cat "$calls")"
 pass "setup installs, enrols, verifies, and only then writes the lock-face PAM service"
 

@@ -7,8 +7,9 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 # The face consent window is opened by a root daemon for every sudo and polkit
 # request. These asserts hold the line on what it may show and how it answers:
 # the answer token travels on stdin, never argv; spawned binaries are absolute;
-# text the requester supplied about itself is never on the prominent line and
-# is labelled unverified; and the layer never reaches a screen share.
+# the card is two lines, what is asked and who asked, each labelled by whether
+# the daemon read it itself, with nothing cut or hidden; and the layer never
+# reaches a screen share.
 
 run_node_test <<'JS'
 const fs = require('fs')
@@ -23,17 +24,40 @@ const commands = [...consent.matchAll(/command\s*[=:]\s*\[\s*"([^"]*)"/g)].map(m
 assert(commands.length >= 2, 'the consent window spawns processes', String(commands))
 assert(commands.every(c => c === '/usr/bin/faceauth' || c === '/usr/bin/kill'), 'every spawned binary is /usr/bin/faceauth or /usr/bin/kill', String(commands))
 
-assert(/text: String\(\(root\.caller \|\| \{\}\)\.command \|\| ""\)/.test(consent), 'the prominent line shows the command the daemon derived')
-assert(/text: "Unverified, requester says: " \+ root\.claim/.test(consent), "the requester claim is labelled unverified before the text, so elision cannot hide the label")
-const claimBlock = consent.match(/text: "Unverified, requester says: "[\s\S]*?font\.pixelSize: ([\w.]+)/)
-assertEqual(claimBlock && claimBlock[1], 'Style.font.caption', 'the requester claim is caption-sized')
-// Each Text block, cut at its own font size, so a claim can only be seen
-// beside the size it is drawn at.
-const blocks = consent.split(/\bText \{/).slice(1).map(chunk => chunk.split('font.pixelSize:')[0] + 'font.pixelSize:' + (chunk.split('font.pixelSize:')[1] || '').split('\n')[0])
-const prominent = blocks.filter(block => /font\.pixelSize: Style\.font\.(title|body)/.test(block))
-assert(prominent.length >= 3, 'the prominent Text blocks were found', String(prominent.length))
-assert(prominent.every(block => !/claim/.test(block)), 'the requester claim never reaches a title or body-sized line')
-assert(blocks.some(block => /claim/.test(block) && /Style\.font\.caption/.test(block)), 'the requester claim is drawn at caption size')
+// Line 1: the label is keyed on caller.verified alone and precedes the command,
+// so no requester-supplied text can pick or push aside its own label.
+assert(/readonly property bool verified: \(root\.caller \|\| \{\}\)\.verified === true/.test(consent), 'verified is read from caller.verified and nothing else')
+assert(/\(root\.verified \? "Run as root: " : "Unverified: "\) \+ String\(\(root\.caller \|\| \{\}\)\.command \|\| ""\)/.test(consent), 'line 1 is "Run as root: " or "Unverified: " keyed on caller.verified, then caller.command')
+// Line 2: who asked, from caller.who, labelled.
+assert(/"Requester: " \+ String\(\(root\.caller \|\| \{\}\)\.who \|\| ""\)/.test(consent), 'line 2 is "Requester: " then caller.who')
+
+// The old shapes are gone: no relayed claim, no separately assembled
+// requester line, no answer deadline.
+assert(!/claim/.test(consent), 'the window knows no claim field')
+assert(!/requesterLine/.test(consent), 'the window no longer assembles its own requester line')
+assert(!/Waits /.test(consent), 'the window shows no answer deadline')
+assert(!/\btimed\b/.test(consent), 'the window has no timed property')
+
+// Each Text block, cut at its own closing brace, so a line can only be
+// checked beside the properties it is drawn with.
+const blocks = consent.split(/\bText \{/).slice(1).map(chunk => chunk.split(/\n\s*\}\n/)[0])
+const commandBlock = blocks.find(block => /text: root\.commandLine/.test(block))
+const requesterBlock = blocks.find(block => /text: root\.requesterText/.test(block))
+assert(commandBlock, 'the command line is drawn')
+assert(requesterBlock, 'the requester line is drawn')
+assert(/font\.pixelSize: Style\.font\.body/.test(commandBlock), 'the command line is body-sized')
+assert(/font\.pixelSize: Style\.font\.caption/.test(requesterBlock), 'the requester line is caption-sized')
+for (const [name, block] of [['command', commandBlock], ['requester', requesterBlock]]) {
+  assert(/textFormat: Text\.PlainText/.test(block), `the ${name} line is plain text`)
+  assert(/wrapMode: Text\.WrapAtWordBoundaryOrAnywhere/.test(block), `the ${name} line wraps anywhere, so a long token cannot push text off the card`)
+  assert(!/maximumLineCount/.test(block), `the ${name} line has no line limit`)
+  assert(!/elide/.test(block), `the ${name} line is never elided`)
+}
+
+const pendingLine = consent.split('\n').find(line => /readonly property bool pending:/.test(line)) || ''
+for (const state of ['scanning', 'nod', 'confirming', 'password', 'locked']) {
+  assert(pendingLine.includes(`root.state === "${state}"`), `${state} is a pending state`, pendingLine)
+}
 
 assert(!/queued/.test(consent), 'the window knows no queued state; a waiting request is a notification, not a second window')
 

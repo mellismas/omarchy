@@ -15,7 +15,13 @@ target_user=$USER
 
 backup_dir=/var/backups/faceauth
 created_marker=$backup_dir/polkit-1.created-by-faceauth
+# sudo: everything the module returns but a match is ignore, and the stack
+# falls to the terminal password as usual (a shake at the window means "not
+# by face"). polkit: a refusal at the window is PAM_AUTH_ERR and ends the
+# stack, and the agent cancels the request on it; otherwise polkit would
+# start the helper again and ask forever.
 face_line='auth      sufficient pam_faceauth.so socket=/run/faceauth/sock consent'
+polkit_face_line='auth      [success=done auth_err=die default=ignore] pam_faceauth.so socket=/run/faceauth/sock consent'
 
 # Backups go outside /etc/pam.d: a stray file inside the PAM directory is a
 # service of its own. Only the first backup of a file is kept, so it always
@@ -32,9 +38,9 @@ backup_pam() {
 # Elevation is a deliberate act: the line carries `consent`, so the daemon
 # opens a window naming the request and approves it only on two nods (or the
 # password typed there). Sitting in front of the machine never elevates
-# anything by itself. The line goes above the password and is `sufficient`,
-# never `required`: every failure inside the module is PAM_IGNORE, so the
-# password path stays the floor.
+# anything by itself. The line goes above the password; every failure inside
+# the module is PAM_IGNORE, so the password path stays the floor, and only
+# the user's own no (auth_err) ends the stack.
 setup_pam_config() {
   if grep -qE '^[^#]*pam_faceauth\.so' /etc/pam.d/sudo; then
     echo "Sudo is already configured for face authentication."
@@ -50,7 +56,7 @@ setup_pam_config() {
     else
       echo "Configuring polkit for face authentication..."
       backup_pam /etc/pam.d/polkit-1
-      sudo sed -i "1i $face_line" /etc/pam.d/polkit-1
+      sudo sed -i "1i $polkit_face_line" /etc/pam.d/polkit-1
     fi
   else
     # No file in /etc/pam.d means polkit runs the vendor stack; an override
@@ -59,11 +65,11 @@ setup_pam_config() {
     echo "Creating polkit configuration with face authentication..."
     sudo install -dm700 "$backup_dir"
     sudo touch "$created_marker"
-    # omarchy:heredoc-expands paths=face_line -- $face_line is the constant PAM
+    # omarchy:heredoc-expands paths=polkit_face_line -- $polkit_face_line is the constant PAM
     # line set at the top of this script, never user input; nothing else expands.
     sudo tee /etc/pam.d/polkit-1 >/dev/null <<EOF
 #%PAM-1.0
-$face_line
+$polkit_face_line
 auth       include      system-auth
 account    include      system-auth
 password   include      system-auth

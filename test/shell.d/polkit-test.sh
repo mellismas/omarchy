@@ -60,4 +60,18 @@ auth required pam_unix.so
 `),
   'polkit reports no fingerprint when pam_fprintd is absent'
 )
+
+// A face refusal reaches the agent as a PAM failure; polkit would then ask
+// again forever. The agent must cancel the request instead, and only when
+// no password was submitted from its own dialog.
+const fs = require('fs')
+const path = require('path')
+const agent = fs.readFileSync(path.join(process.env.ROOT, 'shell/plugins/polkit/PolkitAgent.qml'), 'utf8')
+const failed = agent.match(/function onAuthenticationFailed\(\) \{([\s\S]*?)\n    \}/)
+assert(failed, 'the agent handles authenticationFailed')
+assert(/if \(root\.faceConfigured && !root\.submitted\)/.test(failed[1]), 'a failure in face mode with nothing submitted is the face refusal')
+assert(/Qt\.callLater\(root\.cancelRequest\)/.test(failed[1]), 'the agent cancels the request, deferred past the flow restart')
+assert(/root\.refusing = true/.test(failed[1]), 'the agent marks the refusal before the cancel lands')
+assert(/dialogVisible: \(agentActive \|\| closing\) && !faceMode && !refusing/.test(agent), 'the dialog stays hidden while a face refusal is being cancelled')
+assert(failed[1].indexOf('return') !== -1 && failed[1].indexOf('return') < failed[1].indexOf('root.triggerFailureFeedback()'), 'no failure feedback is shown for a face refusal')
 JS

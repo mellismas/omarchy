@@ -12,8 +12,9 @@ import qs.Ui
 // password typed here and checked by the daemon against the system PAM stack.
 // The window stays until the request is approved, refused, dismissed or the
 // requester killed; it never times out on its own while a request is live.
-// The prominent lines carry only what the daemon read from /proc; anything
-// the requester said about itself is shown apart and marked unverified.
+// The card shows two lines: what is being asked, labelled by whether the
+// daemon read it from /proc itself or the requesting side relayed it, and
+// who asked, as the daemon found it in /proc.
 Item {
   id: root
 
@@ -33,17 +34,15 @@ Item {
   readonly property int cornerRadius: Style.cornerRadius
   readonly property int cardWidth: Math.min(Style.space(560), panel.width - Style.gapsOut * 2)
 
-  readonly property string requesterLine: {
-    var c = root.caller || {}
-    var who = c.via ? String(c.via) : "unknown"
-    var pid = c.kill_pid ? String(c.kill_pid) : (c.pid ? String(c.pid) : "?")
-    return who + " (pid " + pid + ")" + (c.parents ? "  from  " + c.parents : "")
-  }
+  // Line 1: what is being asked. `verified` is true when the daemon read the
+  // command line from /proc itself; false when the text was relayed from the
+  // requesting side (a polkit action description), which the daemon cannot
+  // check. The label says which, and comes first so wrapping cannot hide it.
+  readonly property bool verified: (root.caller || {}).verified === true
+  readonly property string commandLine: (root.verified ? "Run as root: " : "Unverified: ") + String((root.caller || {}).command || "")
 
-  // What the requester said about itself (a polkit action id and message,
-  // relayed by the agent). The daemon cannot check it, so it is shown below
-  // the line the daemon derived from /proc, and labelled as unverified.
-  readonly property string claim: String((root.caller || {}).claim || "")
+  // Line 2: who asked, as the daemon found it in /proc.
+  readonly property string requesterText: "Requester: " + String((root.caller || {}).who || "")
 
   // The window owns its own lifetime. A final state lingers long enough to be
   // read (an approval briefly, a refusal longer so kill/block can still be
@@ -85,8 +84,7 @@ Item {
   }
 
   property string token: ""
-  readonly property bool pending: root.state === "scanning" || root.state === "nod" || root.state === "password" || root.state === "locked"
-  readonly property bool timed: root.seconds > 0 && (root.state === "scanning" || root.state === "nod" || root.state === "password")
+  readonly property bool pending: root.state === "scanning" || root.state === "nod" || root.state === "confirming" || root.state === "password" || root.state === "locked"
 
   function close() {
     autoClose.stop()
@@ -198,9 +196,9 @@ Item {
 
         Text {
           width: parent.width
-          // The whole command, wrapped, never cut: the daemon caps it at 300
-          // characters, so this is a few lines at most.
-          text: String((root.caller || {}).command || "")
+          // The whole command, wrapped, never cut: the daemon caps it at 2000
+          // characters. No line limit and no elision, so nothing is hidden.
+          text: root.commandLine
           textFormat: Text.PlainText
           color: root.foreground
           font.family: root.fontFamily
@@ -210,31 +208,13 @@ Item {
 
         Text {
           width: parent.width
-          text: root.requesterLine
-          textFormat: Text.PlainText
-          color: root.foreground
-          opacity: 0.6
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          wrapMode: Text.Wrap
-          maximumLineCount: 2
-          elide: Text.ElideRight
-        }
-
-        Text {
-          width: parent.width
-          visible: root.claim.length > 0
-          // Readable, not dim: for a plain polkit action this is the only
-          // description there is. The label carries the caveat.
-          text: "Unverified, requester says: " + root.claim
+          text: root.requesterText
           textFormat: Text.PlainText
           color: root.foreground
           opacity: 0.9
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
-          wrapMode: Text.Wrap
-          maximumLineCount: 2
-          elide: Text.ElideRight
+          wrapMode: Text.WrapAtWordBoundaryOrAnywhere
         }
 
         Rectangle { width: parent.width; height: 1; color: root.foreground; opacity: 0.15 }
@@ -262,17 +242,6 @@ Item {
             wrapMode: Text.Wrap
             anchors.verticalCenter: parent.verticalCenter
           }
-        }
-
-        Text {
-          width: parent.width
-          visible: root.timed
-          text: "Waits " + Math.round(root.seconds) + " s for an answer"
-          textFormat: Text.PlainText
-          color: root.foreground
-          opacity: 0.6
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
         }
 
         TextField {

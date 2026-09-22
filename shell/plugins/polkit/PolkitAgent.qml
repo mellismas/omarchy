@@ -43,7 +43,11 @@ Item {
   property int shakeOffset: 0
 
   readonly property bool faceMode: faceConfigured && agentActive && !responseRequired && !submitted && !errorFlash
-  readonly property bool dialogVisible: (agentActive || closing) && !faceMode
+  // Set when a face refusal is being turned into a cancel: polkit asks for a
+  // password in the instant before the cancel lands, and the dialog must not
+  // flash for that.
+  property bool refusing: false
+  readonly property bool dialogVisible: (agentActive || closing) && !faceMode && !refusing
   // We show one method at a time. Fingerprint owns the dialog while PAM is
   // waiting on the reader (lid open, sensor enrolled); the moment PAM asks for
   // a password — including immediately when the lid is shut and the clamshell
@@ -113,6 +117,7 @@ Item {
   function beginFlow() {
     closeTimer.stop()
     closing = false
+    refusing = false
     submitted = false
     passwordInput.text = ""
     refreshLidState()
@@ -162,6 +167,7 @@ Item {
     repeat: false
     onTriggered: {
       closing = false
+      refusing = false
       resetSnapshot()
     }
   }
@@ -253,6 +259,18 @@ Item {
     function onFailedChanged() { root.syncFromFlow() }
 
     function onAuthenticationFailed() {
+      // In face mode a failure with no password submitted from here can only
+      // be the face window's refusal (a head shake, a dismissal): the answer
+      // is no. Polkit would start the helper again and ask forever, so the
+      // agent cancels the request instead, exactly as Escape does. Deferred:
+      // the flow restarts its session right after this signal, and the cancel
+      // has to land on that session for the request to end.
+      if (root.faceConfigured && !root.submitted) {
+        console.log("omarchy polkit: face consent refused, cancelling the request")
+        root.refusing = true
+        Qt.callLater(root.cancelRequest)
+        return
+      }
       root.syncFromFlow()
       root.triggerFailureFeedback()
     }
