@@ -19,11 +19,12 @@ face_line='auth      sufficient pam_faceauth.so socket=/run/faceauth/sock consen
 
 # Backups go outside /etc/pam.d: a stray file inside the PAM directory is a
 # service of its own. Only the first backup of a file is kept, so it always
-# holds the pre-face state, not the state before the latest re-run.
+# holds the pre-face state, not the state before the latest re-run. The
+# directory is root-only, so the existing backup is looked up through sudo.
 backup_pam() {
   local file="$1"
   sudo install -dm700 "$backup_dir"
-  if [[ -f $file && ! -f $backup_dir/${file##*/}.pre-face ]]; then
+  if [[ -f $file ]] && ! sudo test -f "$backup_dir/${file##*/}.pre-face"; then
     sudo cp -p "$file" "$backup_dir/${file##*/}.pre-face"
   fi
 }

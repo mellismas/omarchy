@@ -27,15 +27,19 @@ target_user=$USER
 backup_dir=/var/backups/faceauth
 created_marker=$backup_dir/polkit-1.created-by-faceauth
 
-# The original file is restored when we have it, never a hand-written
-# reconstruction; otherwise only our line is removed.
+# The original file is restored only when nothing but our line changed since
+# the backup was taken: restoring it wholesale would drop a fingerprint or
+# FIDO2 line added later. Otherwise only our line is removed. A used backup
+# is deleted so it cannot be replayed by a later run. The backup directory
+# is root-only, so its files are looked up through sudo.
 restore_or_strip() {
   local file="$1" backup="$backup_dir/${1##*/}.pre-face"
   [[ -f $file ]] || return 0
   grep -q pam_faceauth.so "$file" || return 0
   echo "Removing face authentication from ${file##*/}..."
-  if [[ -f $backup ]]; then
+  if sudo test -f "$backup" && sed '/pam_faceauth\.so/d' "$file" | sudo cmp -s - "$backup"; then
     sudo cp -p "$backup" "$file"
+    sudo rm -f "$backup"
   else
     sudo sed -i '/pam_faceauth\.so/d' "$file"
   fi
@@ -46,7 +50,7 @@ echo -e "\e[32mRemoving face authentication.\n\e[0m"
 # PAM first, always, whatever else is chosen: dropping the module while the
 # stacks reference it would leave them unable to authenticate.
 restore_or_strip /etc/pam.d/sudo
-if [[ -f $created_marker ]]; then
+if sudo test -f "$created_marker"; then
   # Setup created this override; deleting it returns polkit to the vendor stack.
   echo "Removing the polkit override that setup created..."
   sudo rm -f /etc/pam.d/polkit-1 "$created_marker"

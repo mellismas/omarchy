@@ -52,8 +52,16 @@ case "${1:-}" in
     /usr/bin/rm "${args[@]}"
     ;;
   sed)
-    [[ $2 == -i && $3 == 1i* ]] || { echo "unexpected sed: $*" >&2; exit 97; }
+    [[ $2 == -i && ( $3 == 1i* || $3 == '/pam_faceauth\.so/d' ) ]] || { echo "unexpected sed: $*" >&2; exit 97; }
     /usr/bin/sed -i "$3" "$(map "$4")"
+    ;;
+  test)
+    [[ $2 == -f ]] || { echo "unexpected test: $*" >&2; exit 97; }
+    [[ -f $(map "$3") ]]
+    ;;
+  cmp)
+    [[ $2 == -s && $3 == - ]] || { echo "unexpected cmp: $*" >&2; exit 97; }
+    /usr/bin/cmp -s - "$(map "$4")"
     ;;
   install)
     [[ $2 == -dm700 ]] || { echo "unexpected install: $*" >&2; exit 97; }
@@ -148,7 +156,8 @@ run_script() {
   [[ $script == "$setup" ]] && script=$setup_copy
   [[ $script == "$remove" ]] && script=$remove_copy
   : >"$calls"
-  printf 'auth include system-auth\n' >"$pamd/sudo"
+  # keep_pam=1 leaves the sudo stack as the previous run left it.
+  (( ${keep_pam:-0} )) || printf 'auth include system-auth\n' >"$pamd/sudo"
   TEST_LOG="$calls" TEST_PAMD="$pamd" TEST_BACKUPS="$backups" TEST_CAMERA="$camera" TEST_ENROLL="$enroll" TEST_AUTH="$auth" \
     PATH="$stub_bin:$PATH" bash "$script" "$@" </dev/null >/dev/null 2>&1
 }
@@ -218,3 +227,26 @@ pass "removal keeps the templates when asked"
 
 run_script "$remove" present ok match --bogus && fail "removal rejects an unknown flag before deleting anything"
 pass "removal rejects an unknown flag"
+
+# The backup is restored only when nothing but our line changed since it was
+# taken. A FIDO2 line added after face was set up must survive removal.
+rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
+run_script "$setup" present ok match || fail "setup succeeds before the later change" "$(cat "$calls")"
+[[ -f $backups/sudo.pre-face ]] || fail "setup backs up the sudo stack"
+/usr/bin/sed -i '2i auth sufficient pam_u2f.so cue' "$pamd/sudo"
+keep_pam=1 run_script "$remove" present ok match || fail "removal succeeds after a later change" "$(cat "$calls")"
+grep -q pam_u2f.so "$pamd/sudo" || fail "removal keeps a pam_u2f line added after setup" "$(cat "$pamd/sudo")"
+! grep -q pam_faceauth "$pamd/sudo" || fail "removal still takes our line off a changed stack" "$(cat "$pamd/sudo")"
+[[ $(grep -c . "$pamd/sudo") == 2 ]] || fail "removal leaves the changed stack otherwise as it was" "$(cat "$pamd/sudo")"
+grep -q $'sudo\tsed\t-i' "$calls" || fail "a changed stack is stripped, not restored" "$(cat "$calls")"
+pass "removal strips only our line when the stack changed after setup"
+
+# Nothing else changed: the backup is restored, then deleted so a later run
+# cannot replay it.
+rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
+run_script "$setup" present ok match || fail "setup succeeds before an unchanged removal" "$(cat "$calls")"
+keep_pam=1 run_script "$remove" present ok match || fail "removal succeeds on an unchanged stack" "$(cat "$calls")"
+[[ $(cat "$pamd/sudo") == "auth include system-auth" ]] || fail "removal restores the backed-up sudo stack" "$(cat "$pamd/sudo")"
+grep -q $'sudo\tcp' "$calls" || fail "an unchanged stack is restored from the backup" "$(cat "$calls")"
+[[ ! -e $backups/sudo.pre-face ]] || fail "removal deletes the backup it restored"
+pass "removal restores the backup on an unchanged stack and deletes it"

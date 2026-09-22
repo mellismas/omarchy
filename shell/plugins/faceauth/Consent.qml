@@ -12,6 +12,8 @@ import qs.Ui
 // password typed here and checked by the daemon against the system PAM stack.
 // The window stays until the request is approved, refused, dismissed or the
 // requester killed; it never times out on its own while a request is live.
+// The prominent lines carry only what the daemon read from /proc; anything
+// the requester said about itself is shown apart and marked unverified.
 Item {
   id: root
 
@@ -37,6 +39,11 @@ Item {
     var pid = c.kill_pid ? String(c.kill_pid) : (c.pid ? String(c.pid) : "?")
     return who + " (pid " + pid + ")" + (c.parents ? "  from  " + c.parents : "")
   }
+
+  // What the requester said about itself (a polkit action id and message,
+  // relayed by the agent). The daemon cannot check it, so it is shown below
+  // the line the daemon derived from /proc, and labelled as unverified.
+  readonly property string claim: String((root.caller || {}).claim || "")
 
   // The window owns its own lifetime. A final state lingers long enough to be
   // read (an approval briefly, a refusal longer so kill/block can still be
@@ -79,6 +86,7 @@ Item {
 
   property string token: ""
   readonly property bool pending: root.state === "scanning" || root.state === "nod" || root.state === "password" || root.state === "locked"
+  readonly property bool timed: root.seconds > 0 && (root.state === "scanning" || root.state === "nod" || root.state === "password")
 
   function close() {
     autoClose.stop()
@@ -87,13 +95,13 @@ Item {
     passwordField.text = ""
   }
 
-  // Send an answer for the pending request to the daemon: a dismissal, or
-  // the password over stdin (never argv). The daemon accepts it only while
-  // this user's request is live, and only from this user's own uid.
+  // Send an answer for the pending request to the daemon. The token from
+  // the payload goes first on stdin, the password (if any) second; nothing
+  // secret is ever on argv. The daemon accepts it only while this user's
+  // request is live, and only from this user's own uid.
   function answer(args, secret) {
-    answerProc.secret = secret
-    // The token the daemon put in the payload: an answer without it is nobody's.
-    answerProc.command = ["faceauth", "consent-answer", "--token", root.token].concat(args)
+    answerProc.lines = [root.token].concat(secret.length > 0 ? [secret] : [])
+    answerProc.command = ["/usr/bin/faceauth", "consent-answer"].concat(args)
     answerProc.running = true
   }
 
@@ -106,18 +114,19 @@ Item {
 
   Process {
     id: answerProc
-    property string secret: ""
+    property var lines: []
     stdinEnabled: true
     onStarted: {
-      if (secret.length > 0) write(secret + "\n")
-      secret = ""
+      for (var i = 0; i < lines.length; i++) write(lines[i] + "\n")
+      lines = []
+      stdinEnabled = false
     }
   }
 
   function killRequester() {
     var pid = Number((root.caller || {}).kill_pid || 0)
     if (pid > 1) {
-      killProc.command = ["kill", "-TERM", String(pid)]
+      killProc.command = ["/usr/bin/kill", "-TERM", String(pid)]
       killProc.running = true
     }
     root.close()
@@ -212,6 +221,20 @@ Item {
           elide: Text.ElideRight
         }
 
+        Text {
+          width: parent.width
+          visible: root.claim.length > 0
+          text: "Requester says: " + root.claim + " (not verified)"
+          textFormat: Text.PlainText
+          color: root.foreground
+          opacity: 0.6
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.Wrap
+          maximumLineCount: 2
+          elide: Text.ElideRight
+        }
+
         Rectangle { width: parent.width; height: 1; color: root.foreground; opacity: 0.15 }
 
         Row {
@@ -237,6 +260,17 @@ Item {
             wrapMode: Text.Wrap
             anchors.verticalCenter: parent.verticalCenter
           }
+        }
+
+        Text {
+          width: parent.width
+          visible: root.timed
+          text: "Waits " + Math.round(root.seconds) + " s for an answer"
+          textFormat: Text.PlainText
+          color: root.foreground
+          opacity: 0.6
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
         }
 
         TextField {
