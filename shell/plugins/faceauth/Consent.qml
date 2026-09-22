@@ -224,10 +224,12 @@ Item {
         Text {
           width: parent.width
           visible: root.claim.length > 0
+          // Readable, not dim: for a plain polkit action this is the only
+          // description there is. The label carries the caveat.
           text: "Unverified, requester says: " + root.claim
           textFormat: Text.PlainText
           color: root.foreground
-          opacity: 0.6
+          opacity: 0.9
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.Wrap
