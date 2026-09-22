@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "omarchy.faceauth",
+  "name": "Face Authentication Consent",
+  "version": "1.0.0",
+  "author": "Omarchy",
+  "description": "Consent window for sudo and polkit requests approved by face.",
+  "omarchy": {
+    "capabilities": [
+      "authentication"
+    ]
+  },
+  "kinds": [
+    "overlay"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "Consent.qml"
+  }
+}

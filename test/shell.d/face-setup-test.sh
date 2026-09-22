@@ -18,7 +18,8 @@ test_tmp=$(mktemp -d)
 stub_bin="$test_tmp/bin"
 calls="$test_tmp/calls.log"
 pamd="$test_tmp/pam.d"
-mkdir -p "$stub_bin" "$pamd"
+backups="$test_tmp/backups"
+mkdir -p "$stub_bin" "$pamd" "$backups"
 
 cleanup() {
   rm -rf "$test_tmp"
@@ -38,16 +39,31 @@ printf 'sudo' >>"$TEST_LOG"
 printf '\t%s' "$@" >>"$TEST_LOG"
 printf '\n' >>"$TEST_LOG"
 
-# The scripts run from copies retargeted at the scratch tree, so the paths
-# arriving here are already inside it; anything else is refused.
+# Every path under /etc/pam.d or /var/backups/faceauth is redirected into the
+# scratch tree, so the real scripts run unchanged and never touch the host.
+map() { local p=$1; p=${p/#\/etc\/pam.d/$TEST_PAMD}; p=${p/#\/var\/backups\/faceauth/$TEST_BACKUPS}; printf '%s' "$p"; }
+
 case "${1:-}" in
   tee)
-    [[ $2 == "$TEST_PAMD"/* ]] || { echo "unexpected tee target: $2" >&2; exit 97; }
-    /usr/bin/cat >"$2"
+    /usr/bin/cat >"$(map "$2")"
     ;;
   rm)
-    [[ $3 == "$TEST_PAMD"/* ]] || { echo "unexpected rm target: $3" >&2; exit 97; }
-    /usr/bin/rm -f "$3"
+    shift; args=(); for a in "$@"; do [[ $a == -* ]] && args+=("$a") || args+=("$(map "$a")"); done
+    /usr/bin/rm "${args[@]}"
+    ;;
+  sed)
+    [[ $2 == -i && $3 == 1i* ]] || { echo "unexpected sed: $*" >&2; exit 97; }
+    /usr/bin/sed -i "$3" "$(map "$4")"
+    ;;
+  install)
+    [[ $2 == -dm700 ]] || { echo "unexpected install: $*" >&2; exit 97; }
+    /usr/bin/install -dm700 "$(map "$3")"
+    ;;
+  cp)
+    /usr/bin/cp -p "$(map "$3")" "$(map "$4")"
+    ;;
+  touch)
+    /usr/bin/touch "$(map "$2")"
     ;;
   faceauth|systemctl)
     exec "$@"
@@ -68,6 +84,7 @@ printf '\n' >>"$TEST_LOG"
 
 case "${1:-}" in
   enroll) [[ $TEST_ENROLL == ok ]] ;;
+  calibrate) : ;;
   auth)
     if [[ $TEST_AUTH == match ]]; then echo '{"result":"match","frames":2,"elapsed_ms":1500}'
     else echo '{"result":"no_match","frames":2,"elapsed_ms":4000}'; fi
@@ -109,20 +126,21 @@ SH
 
 chmod +x "$stub_bin"/*
 
-# The scripts name the PAM service by its real path; a copy retargeted at the
-# scratch tree keeps the host out of it. Both must name that path exactly once,
-# so the copy cannot quietly stop standing for the command it copies.
+# The scripts read /etc/pam.d directly (unprivileged reads) before asking sudo
+# to write; a copy retargeted at the scratch tree keeps the host out of it.
+# Both must name the lock-face service exactly as expected, so the copy cannot
+# quietly stop standing for the command it copies.
 occurrences=$(grep -c '/etc/pam.d/omarchy-lock-face' "$setup") || occurrences=0
 (( occurrences == 1 )) || fail "setup names the lock-face PAM service exactly once" "found $occurrences occurrences"
 occurrences=$(grep -c '/etc/pam.d/omarchy-lock-face' "$remove") || occurrences=0
 (( occurrences == 2 )) || fail "removal names the lock-face PAM service exactly twice (the check and the rm)" "found $occurrences occurrences"
 retarget() {
-  sed -e "s|/etc/pam.d|$pamd|g" "$1"
+  sed -e "s|/etc/pam.d|$pamd|g" -e "s|/var/backups/faceauth|$backups|g" "$1"
 }
 setup_copy="$test_tmp/setup.sh"; retarget "$setup" >"$setup_copy"
 remove_copy="$test_tmp/remove.sh"; retarget "$remove" >"$remove_copy"
-! grep -q '/etc/pam.d' "$setup_copy" "$remove_copy" || fail "the retargeted copies name no real PAM path"
-pass "the scripts name the PAM service once each, and the test drives retargeted copies"
+! grep -qE '/etc/pam\.d|/var/backups/faceauth' "$setup_copy" "$remove_copy" || fail "the retargeted copies name no real path"
+pass "the scripts name the PAM service as expected, and the test drives retargeted copies"
 
 run_script() {
   local script=$1 camera=$2 enroll=$3 auth=$4
@@ -130,7 +148,8 @@ run_script() {
   [[ $script == "$setup" ]] && script=$setup_copy
   [[ $script == "$remove" ]] && script=$remove_copy
   : >"$calls"
-  TEST_LOG="$calls" TEST_PAMD="$pamd" TEST_CAMERA="$camera" TEST_ENROLL="$enroll" TEST_AUTH="$auth" \
+  printf 'auth include system-auth\n' >"$pamd/sudo"
+  TEST_LOG="$calls" TEST_PAMD="$pamd" TEST_BACKUPS="$backups" TEST_CAMERA="$camera" TEST_ENROLL="$enroll" TEST_AUTH="$auth" \
     PATH="$stub_bin:$PATH" bash "$script" "$@" </dev/null >/dev/null 2>&1
 }
 
@@ -151,6 +170,7 @@ pass "setup writes no PAM service when enrolment fails"
 rm -f "$pamd/omarchy-lock-face"
 run_script "$setup" present ok nomatch && fail "setup with a failed verification fails"
 [[ ! -e $pamd/omarchy-lock-face ]] || fail "setup writes no PAM service when verification fails"
+! grep -q pam_faceauth "$pamd/sudo" || fail "setup leaves the sudo stack alone when verification fails"
 grep -q $'faceauth\tauth\t--user' "$calls" || fail "setup verifies the enrolment with a scan" "$(cat "$calls")"
 pass "setup writes no PAM service when the verification scan does not match"
 
@@ -166,6 +186,12 @@ tee_line=$(grep -n $'sudo\ttee' "$calls" | head -1 | cut -d: -f1)
 (( enrol_line < tee_line )) || fail "the PAM service is written only after enrolment" "$(cat "$calls")"
 grep -q $'omarchy-pkg-add\tomarchy-faceauth' "$calls" || fail "setup installs the package" "$(cat "$calls")"
 grep -q $'faceauth\tmodels\tfetch' "$calls" || fail "setup fetches the models" "$(cat "$calls")"
+grep -q 'pam_faceauth.so socket=/run/faceauth/sock consent' "$pamd/sudo" || fail "setup puts a consent line on the sudo stack" "$(cat "$pamd/sudo")"
+[[ $(head -1 "$pamd/sudo") == *pam_faceauth.so* ]] || fail "the consent line is the first line of the sudo stack"
+[[ -f $backups/sudo.pre-face ]] || fail "setup backs up the sudo stack before changing it"
+[[ -f $pamd/polkit-1 && -f $backups/polkit-1.created-by-faceauth ]] || fail "setup creates polkit-1 when absent and remembers that it did"
+grep -q 'pam_faceauth.so' "$pamd/polkit-1" || fail "the created polkit-1 carries the consent line"
+grep -q $'faceauth\tcalibrate' "$calls" || fail "setup records the person's gestures" "$(cat "$calls")"
 pass "setup installs, enrols, verifies, and only then writes the lock-face PAM service"
 
 # Never under sudo: the enrolment would be root's. EUID is read-only in
@@ -181,6 +207,8 @@ rm_line=$(grep -n $'sudo\trm' "$calls" | head -1 | cut -d: -f1)
 drop_line=$(grep -n 'omarchy-pkg-drop' "$calls" | head -1 | cut -d: -f1)
 (( rm_line < drop_line )) || fail "the PAM service goes before the package" "$(cat "$calls")"
 grep -q $'faceauth\ttemplates\tdelete' "$calls" || fail "removal deletes the templates by default" "$(cat "$calls")"
+! grep -q pam_faceauth "$pamd/sudo" || fail "removal takes the consent line off the sudo stack" "$(cat "$pamd/sudo")"
+[[ ! -e $pamd/polkit-1 ]] || fail "removal deletes the polkit-1 file that setup created"
 pass "removal takes the PAM service out first, deletes the templates, then drops the package"
 
 : >"$calls"

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# omarchy:summary=Remove face authentication from the lock screen
+# omarchy:summary=Remove face authentication from the lock screen, sudo, and polkit
 # omarchy:args=[--keep-templates]
 # omarchy:requires-sudo=true
 
@@ -11,6 +11,8 @@ for arg in "$@"; do
   case $arg in
     --keep-templates) keep_templates=1 ;;
     *)
+      # An unknown flag must abort before anything is deleted; a typo once
+      # wiped a user's data in another project because the flag was ignored.
       echo "Usage: omarchy remove security face [--keep-templates]" >&2
       exit 1
       ;;
@@ -22,11 +24,35 @@ if (( EUID == 0 )); then
   exit 1
 fi
 target_user=$USER
+backup_dir=/var/backups/faceauth
+created_marker=$backup_dir/polkit-1.created-by-faceauth
+
+# The original file is restored when we have it, never a hand-written
+# reconstruction; otherwise only our line is removed.
+restore_or_strip() {
+  local file="$1" backup="$backup_dir/${1##*/}.pre-face"
+  [[ -f $file ]] || return 0
+  grep -q pam_faceauth.so "$file" || return 0
+  echo "Removing face authentication from ${file##*/}..."
+  if [[ -f $backup ]]; then
+    sudo cp -p "$backup" "$file"
+  else
+    sudo sed -i '/pam_faceauth\.so/d' "$file"
+  fi
+}
 
 echo -e "\e[32mRemoving face authentication.\n\e[0m"
 
-# PAM first, whatever else is chosen: dropping the module while a stack
-# references it would leave that stack unable to authenticate.
+# PAM first, always, whatever else is chosen: dropping the module while the
+# stacks reference it would leave them unable to authenticate.
+restore_or_strip /etc/pam.d/sudo
+if [[ -f $created_marker ]]; then
+  # Setup created this override; deleting it returns polkit to the vendor stack.
+  echo "Removing the polkit override that setup created..."
+  sudo rm -f /etc/pam.d/polkit-1 "$created_marker"
+else
+  restore_or_strip /etc/pam.d/polkit-1
+fi
 if [[ -f /etc/pam.d/omarchy-lock-face ]]; then
   echo "Removing lock screen face authentication..."
   sudo rm -f /etc/pam.d/omarchy-lock-face
