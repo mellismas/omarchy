@@ -25,20 +25,27 @@ Item {
   property real seconds: 0
 
   readonly property string fontFamily: Style.font.menuFamily
-  readonly property color background: Color.polkit.background
-  readonly property color foreground: Color.polkit.text
-  readonly property color accent: Color.polkit.accent
-  readonly property color scrim: Color.polkit.scrim
-  readonly property var borderSpec: Border.surfaceSpec("polkit", "border", Color.polkit.border, Math.max(1, Style.space(2)), "border-alpha")
+  // The menu's palette, so the card looks like the system's own windows:
+  // foreground border and title, the theme accent only where something is
+  // positive (Approve, the armed note), red only for the refusal.
+  readonly property color background: Color.menu.background
+  readonly property color foreground: Color.menu.text
+  readonly property color accent: Color.menu.selectedText
+  readonly property color scrim: Color.menu.scrim
+  readonly property var borderSpec: Border.surfaceSpec("menu", "border", Color.menu.border, Math.max(1, Style.space(2)), "border-alpha")
   readonly property int cornerRadius: Style.cornerRadius
-  readonly property int cardWidth: Math.min(Style.space(560), panel.width - Style.gapsOut * 2)
+  // Wide enough for the passwordless row and the three answer buttons to
+  // sit on their own lines without wrapping or crowding.
+  readonly property int cardWidth: Math.min(Style.space(760), panel.width - Style.gapsOut * 2)
 
   // Line 1: what is being asked. `verified` is true when the daemon read the
   // command line from /proc itself; false when the text was relayed from the
   // requesting side (a polkit action description), which the daemon cannot
   // check. The label says which, and comes first so wrapping cannot hide it.
   readonly property bool verified: (root.caller || {}).verified === true
-  readonly property string commandLine: (root.verified ? "Run as root: " : "Unverified: ") + String((root.caller || {}).command || "")
+  // Once the passwordless button is armed, what the nod approves includes
+  // it, so the line the user reads says so.
+  readonly property string commandLine: (root.verified ? "Run as root: " : "Unverified: ") + String((root.caller || {}).command || "") + (root.passwordlessArmed.length > 0 ? "  and passwordless sudo for " + root.passwordlessArmed + " min" : "")
 
   // Line 2: who asked, as the daemon found it in /proc.
   readonly property string requesterText: "Requester: " + String((root.caller || {}).who || "")
@@ -85,6 +92,7 @@ Item {
       // request. It reads no nod until that arrives.
       root.token = token
       passwordField.text = ""
+      root.passwordlessArmed = ""
       Qt.callLater(function() { passwordField.forceActiveFocus() })
       if (token.length > 0) root.answer(["--ack"], "")
     }
@@ -137,6 +145,26 @@ Item {
       lines = []
       stdinEnabled = false
     }
+  }
+
+  // Passwordless sudo for a while, from the card. The button approves
+  // nothing on its own: it tells the daemon, with this request's token,
+  // that the approval of this request should also turn passwordless sudo
+  // on for the minutes typed. The nod (or the password) that approves the
+  // request is the only consent; nothing else appears, and the daemon
+  // writes the same rule and expiry timer Omarchy's own command would.
+  // Only on a sudo request: polkit is not covered by the sudoers rule.
+  readonly property bool sudoRequest: String((root.caller || {}).via || "") === "sudo" && !/(^|[\s\/])omarchy-sudo-passwordless(\s|$)/.test(String((root.caller || {}).command || ""))
+  readonly property string passwordlessMinutes: {
+    var m = parseInt(String(minutesField.text || "").trim(), 10)
+    return (m > 0 && m <= 1440) ? String(m) : ""
+  }
+  property string passwordlessArmed: ""
+
+  function armPasswordless() {
+    if (root.passwordlessMinutes.length === 0 || !root.pending) return
+    root.passwordlessArmed = root.passwordlessMinutes
+    root.answer(["--passwordless", root.passwordlessMinutes], "")
   }
 
   function killRequester() {
@@ -197,7 +225,7 @@ Item {
         Text {
           width: parent.width
           text: "Root access requested"
-          color: root.accent
+          color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.title
           font.bold: true
@@ -235,7 +263,7 @@ Item {
           Text {
             text: root.state === "approved" ? "󰖎" : (root.state === "denied" ? "󰅙" : "󰵃")
             textFormat: Text.PlainText
-            color: root.state === "denied" ? Color.polkit.textError : root.accent
+            color: root.state === "denied" ? Color.polkit.textError : root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.iconLarge
             anchors.verticalCenter: parent.verticalCenter
@@ -266,29 +294,101 @@ Item {
           Keys.onEscapePressed: root.close()
         }
 
-        Row {
-          spacing: Style.spacing.sm
-          anchors.right: parent.right
+        // One line: the passwordless controls on the left, set apart from
+        // the answer buttons on the right, all centred on the same axis.
+        Item {
+          width: parent.width
+          height: Math.max(passwordlessRow.implicitHeight, answerRow.implicitHeight)
 
-          Button {
-            // Only when the daemon could name the requester: for a plain
-            // polkit action there is no known process to end.
-            visible: root.verified
-            text: "Deny and kill"
-            bordered: true
-            foreground: Color.polkit.textError
-            accent: Color.polkit.textError
-            fontFamily: root.fontFamily
-            onClicked: root.killRequester()
+          Row {
+            id: passwordlessRow
+            spacing: Style.spacing.sm
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            visible: root.sudoRequest && root.pending
+
+            TextField {
+              id: minutesField
+              // Room for three digits, up to a day.
+              width: Style.space(52)
+              visible: root.passwordlessArmed.length === 0
+              anchors.verticalCenter: parent.verticalCenter
+              text: "15"
+              placeholderText: "min"
+              foreground: root.foreground
+              accent: root.accent
+              font.family: root.fontFamily
+              onAccepted: root.armPasswordless()
+              Keys.onEscapePressed: root.close()
+            }
+
+            Button {
+              visible: root.passwordlessArmed.length === 0
+              enabled: root.passwordlessMinutes.length > 0
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Passwordless sudo for " + (root.passwordlessMinutes.length > 0 ? root.passwordlessMinutes : "?") + " min"
+              bordered: true
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.fontFamily
+              onClicked: root.armPasswordless()
+            }
+
+            Text {
+              visible: root.passwordlessArmed.length > 0
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Passwordless sudo armed: " + root.passwordlessArmed + " min with your approval"
+              textFormat: Text.PlainText
+              color: root.accent
+              opacity: 0.8
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
           }
 
-          Button {
-            text: "Dismiss"
-            bordered: true
-            foreground: root.foreground
-            accent: root.accent
-            fontFamily: root.fontFamily
-            onClicked: root.close()
+          Row {
+            id: answerRow
+            spacing: Style.spacing.sm
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+
+            Button {
+              // Only when the daemon could name the requester: for a plain
+              // polkit action there is no known process to end.
+              visible: root.verified
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Deny and kill"
+              bordered: true
+              foreground: Color.polkit.textError
+              accent: Color.polkit.textError
+              fontFamily: root.fontFamily
+              onClicked: root.killRequester()
+            }
+
+            Button {
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Dismiss"
+              bordered: true
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.fontFamily
+              onClicked: root.close()
+            }
+
+            Button {
+              // The mouse form of Enter in the password field: it submits the
+              // typed password and nothing else. Without one there is only
+              // the nod.
+              visible: root.pending
+              enabled: passwordField.text.length > 0
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Approve"
+              bordered: true
+              foreground: root.accent
+              accent: root.accent
+              fontFamily: root.fontFamily
+              onClicked: root.submitPassword()
+            }
           }
         }
       }

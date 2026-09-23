@@ -23,6 +23,32 @@ assert(/"\/usr\/bin\/faceauth", "consent-answer"/.test(consent), 'the answer goe
 const commands = [...consent.matchAll(/command\s*[=:]\s*\[\s*"([^"]*)"/g)].map(m => m[1])
 assert(commands.length >= 2, 'the consent window spawns processes', String(commands))
 assert(commands.every(c => c === '/usr/bin/faceauth' || c === '/usr/bin/kill'), 'every spawned binary is /usr/bin/faceauth or /usr/bin/kill', String(commands))
+
+// The passwordless button approves nothing on its own: it asks the daemon,
+// with the request's token, to turn passwordless sudo on when this request
+// is approved. The nod stays the only consent; nothing else is spawned.
+const pl = consent.match(/function armPasswordless\(\) \{([\s\S]*?)\n  \}/)
+assert(pl, 'the card has a passwordless button')
+assert(/root\.answer\(\["--passwordless", root\.passwordlessMinutes\], ""\)/.test(pl[1]), 'it sends the minutes to the daemon as an answer carrying the token')
+assert(/if \(root\.passwordlessMinutes\.length === 0 \|\| !root\.pending\) return/.test(pl[1]), 'it does nothing without minutes or without a pending request')
+assert(!/root\.close\(\)/.test(pl[1]) && !/--dismiss/.test(pl[1]), 'it neither dismisses nor closes the request on screen')
+assert(!commands.some(c => /passwordless|terminal/.test(c)) && !/floating-terminal/.test(consent), 'no command and no terminal are spawned for it')
+assert(/readonly property bool sudoRequest: String\(\(root\.caller \|\| \{\}\)\.via \|\| ""\) === "sudo" && !\/.*omarchy-sudo-passwordless/.test(consent), 'it is keyed on the daemon-read via, sudo only, and not on the passwordless command\'s own card')
+assert(/visible: root\.sudoRequest && root\.pending/.test(consent), 'it shows only on a pending sudo request')
+const rows = consent.split(/\n\s*Row \{/).slice(1)
+const plRow = rows.find(r => /id: passwordlessRow/.test(r)) || ''
+const answerRow = rows.find(r => /id: answerRow/.test(r)) || ''
+assert(/anchors\.left: parent\.left/.test(plRow) && /anchors\.verticalCenter: parent\.verticalCenter/.test(plRow), 'the passwordless controls sit on the left, centred on the line')
+assert(/anchors\.right: parent\.right/.test(answerRow) && /anchors\.verticalCenter: parent\.verticalCenter/.test(answerRow), 'the answer buttons sit on the right of the same line, centred')
+assert(/root\.passwordlessArmed = ""/.test(consent.match(/if \(fresh\) \{([\s\S]*?)\n    \}/)[1]), 'a new request starts with nothing armed')
+assert(/"  and passwordless sudo for " \+ root\.passwordlessArmed \+ " min"/.test(consent.split('\n').find(l => /readonly property string commandLine:/.test(l)) || ''), 'once armed, the command line the user reads includes the passwordless spell')
+assert(/Passwordless sudo armed: /.test(consent), 'once armed the button gives way to a note')
+
+// Approve is the mouse form of Enter: it submits the typed password only.
+const approve = consent.split(/\bButton \{/).slice(1).find(b => /text: "Approve"/.test(b))
+assert(approve, 'the card has an Approve button')
+assert(/enabled: passwordField\.text\.length > 0/.test(approve), 'Approve is enabled only with a typed password')
+assert(/onClicked: root\.submitPassword\(\)/.test(approve), 'Approve submits the password and nothing else')
 assert(consent.indexOf('blockRequester') === -1 && consent.indexOf('Block 10') === -1, 'the block control is gone (it keyed on an exe that is empty for polkit and sudo itself for sudo)')
 const killBlock = consent.split(/\bButton \{/).slice(1).find(b => /Deny and kill/.test(b))
 assert(killBlock && /visible: root\.verified/.test(killBlock), 'deny-and-kill shows only when the daemon named the requester')
