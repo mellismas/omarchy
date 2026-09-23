@@ -130,10 +130,11 @@ echo -e "On a machine with a TPM they are sealed to it; without one they are pla
 if sudo faceauth enroll --user "$target_user"; then
   echo -e "\nNow let's verify it works.\n"
   if faceauth auth --user "$target_user" | grep -q '^{"result":"match"'; then
-    # The nod and the shake are read against this person's own movement:
-    # two of each, recorded and stored with the templates. A miss here
-    # costs nothing (the defaults stay), so it never blocks the setup.
-    echo -e "\nNow two nods and two head shakes, so the gestures are tuned to you. The window will ask for each.\n"
+    # The nod and the shake are read against this person's own movement,
+    # and against what they do when not gesturing: two of each gesture and
+    # three everyday movements, recorded and stored with the templates. A
+    # miss here costs nothing (the defaults stay), so it never blocks setup.
+    echo -e "\nNow a short calibration: two nods, two head shakes, and three ordinary movements (reading, a glance down, talking).\n"
     sudo faceauth calibrate --user "$target_user" || true
     setup_pam_config
     setup_lock_face_pam
