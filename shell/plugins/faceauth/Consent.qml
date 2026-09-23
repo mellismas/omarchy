@@ -57,6 +57,17 @@ Item {
   function open(payloadJson) {
     var payload = {}
     try { payload = JSON.parse(String(payloadJson || "{}")) } catch (e) { payload = {} }
+    var token = String(payload.token || "")
+    // While a request is pending the window is that request's: only a
+    // payload carrying its token may change what is shown or end it. The
+    // daemon serialises requests, so a summon with another token while one
+    // is pending is not the daemon's next request; it is something of the
+    // user's imitating the daemon, and it changes nothing.
+    if (root.pending && token !== root.token) {
+      console.log("omarchy faceauth: ignored a summon that does not carry the pending request's token")
+      return
+    }
+    var fresh = !root.opened || token !== root.token
     root.state = String(payload.state || "")
     // Pending states and refusals stay until a verdict, a button or Escape;
     // only an approval fades on its own. The long interval is a safety net for
@@ -66,12 +77,28 @@ Item {
     root.message = String(payload.message || "")
     root.caller = payload.caller || {}
     root.seconds = Number(payload.seconds || 0)
-    root.token = String(payload.token || "")
-    var first = !root.opened
     root.opened = true
-    // Focus the password field on the first open only; a state change while
-    // the user is typing must not steal the field.
-    if (first) Qt.callLater(function() { passwordField.forceActiveFocus() })
+    if (fresh) {
+      // A new request: nothing typed for the last one carries over, the
+      // field is focused (a state change while the user is typing must not
+      // steal it), and the daemon is told this window has drawn the
+      // request. It reads no nod until that arrives.
+      root.token = token
+      passwordField.text = ""
+      Qt.callLater(function() { passwordField.forceActiveFocus() })
+      if (token.length > 0) root.answer(["--ack"], "")
+    }
+  }
+
+  // The card is drawn on the output that holds the camera: the laptop's own
+  // panel when there is one, else the first output. A card on a screen the
+  // user is not facing is a card the user is not nodding at.
+  readonly property var cameraScreen: {
+    var screens = Quickshell.screens
+    for (var i = 0; i < screens.length; i++) {
+      if (/^eDP/.test(String(screens[i].name))) return screens[i]
+    }
+    return screens.length > 0 ? screens[0] : null
   }
 
   property string token: ""
@@ -126,6 +153,7 @@ Item {
   PanelWindow {
     id: panel
     visible: root.opened
+    screen: root.cameraScreen
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"
     WlrLayershell.namespace: "omarchy-faceauth"

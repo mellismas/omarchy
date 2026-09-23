@@ -68,4 +68,22 @@ const rule = layerRules.split('\n').find(line => line.includes('^omarchy-faceaut
 assert(rule.includes('hl.layer_rule('), 'omarchy-shell.lua carries a layer rule for the consent window', rule)
 assert(/no_anim = true/.test(rule) && /animation = "none"/.test(rule), 'the consent layer has no animation', rule)
 assert(/no_screen_share = true/.test(rule), 'the consent layer is kept out of screen shares', rule)
+// The window belongs to the pending request. A summon without that request's
+// token changes nothing (any process of the user's can summon), a new token
+// starts clean, and the daemon hears from the window itself that the request
+// is on screen before it reads a nod.
+const open = consent.match(/function open\(payloadJson\) \{([\s\S]*?)\n  \}/)
+assert(open, 'the window has an open function')
+assert(/if \(root\.pending && token !== root\.token\) \{[\s\S]*?return/.test(open[1]), 'while pending, a payload without the request token is ignored')
+assert(open[1].indexOf('root.state = String(payload.state') > open[1].indexOf('return'), 'nothing is applied before the token check')
+const fresh = open[1].match(/if \(fresh\) \{([\s\S]*?)\n    \}/)
+assert(fresh, 'a new token is handled as a fresh request')
+assert(/passwordField\.text = ""/.test(fresh[1]), 'a new request clears the password field')
+assert(/root\.answer\(\["--ack"\], ""\)/.test(fresh[1]), 'a new request is acknowledged to the daemon with its token')
+assert(/var fresh = !root\.opened \|\| token !== root\.token/.test(open[1]), 'fresh means a token the window has not seen')
+
+// The card is drawn on the output that holds the camera.
+const panelBlock = consent.split(/\bPanelWindow \{/)[1] || ''
+assert(/screen: root\.cameraScreen/.test(panelBlock), 'the card is bound to the camera screen')
+assert(/\/\^eDP\/\.test\(String\(screens\[i\]\.name\)\)/.test(consent), 'the camera screen is the built-in panel when there is one')
 JS
