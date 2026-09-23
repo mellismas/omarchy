@@ -307,10 +307,21 @@ Item {
   // Face authentication: a third PAM stack, omarchy-lock-face, on its own lane
   // like the fingerprint one. Typing a password preempts nothing here because
   // the daemon answers within its own timeout; the stacks run independently.
+  // When the daemon answers at once (a cooldown hold, a busy camera, an
+  // error) an attempt costs twenty milliseconds, and any path that starts
+  // the next one on completion would spin. No scan starts within a second
+  // of the last start; the retry timer takes it instead.
+  property double lastFaceStartAt: 0
+
   function startFace() {
     if (!lockRequested || !sessionLock.secure || !faceConfigured) return
     if (displaysBlank || faceProbeMode) return
     if (facePam.active || faceAuthenticating) return
+    if (Date.now() - lastFaceStartAt < 1000) {
+      faceRetryTimer.restart()
+      return
+    }
+    lastFaceStartAt = Date.now()
 
     faceAuthenticating = true
     if (!facePam.start()) {

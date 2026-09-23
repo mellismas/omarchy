@@ -72,4 +72,14 @@ assert(
   /id: faceIcon[\s\S]*?visible: root\.faceConfigured/.test(viewQml),
   'the face indicator shows only when face authentication is configured'
 )
+
+// The daemon can answer at once (a cooldown hold, a busy camera): a scan
+// that finishes in twenty milliseconds must not start the next one at once.
+const startFace = serviceQml.match(/function startFace\(\) \{([\s\S]*?)\n  \}/)
+assert(startFace, 'startFace exists')
+assert(
+  /if \(Date\.now\(\) - lastFaceStartAt < 1000\) \{\s*faceRetryTimer\.restart\(\)\s*return\s*\}/.test(startFace[1]),
+  'no face scan starts within a second of the last; the retry timer spaces it'
+)
+assert(startFace[1].indexOf('lastFaceStartAt = Date.now()') > startFace[1].indexOf('< 1000'), 'the start time is stamped after the guard')
 JS
