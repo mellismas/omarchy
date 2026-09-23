@@ -23,6 +23,9 @@ assert(/"\/usr\/bin\/faceauth", "consent-answer"/.test(consent), 'the answer goe
 const commands = [...consent.matchAll(/command\s*[=:]\s*\[\s*"([^"]*)"/g)].map(m => m[1])
 assert(commands.length >= 2, 'the consent window spawns processes', String(commands))
 assert(commands.every(c => c === '/usr/bin/faceauth' || c === '/usr/bin/kill'), 'every spawned binary is /usr/bin/faceauth or /usr/bin/kill', String(commands))
+assert(consent.indexOf('blockRequester') === -1 && consent.indexOf('Block 10') === -1, 'the block control is gone (it keyed on an exe that is empty for polkit and sudo itself for sudo)')
+const killBlock = consent.split(/\bButton \{/).slice(1).find(b => /Deny and kill/.test(b))
+assert(killBlock && /visible: root\.verified/.test(killBlock), 'deny-and-kill shows only when the daemon named the requester')
 
 // Line 1: the label is keyed on caller.verified alone and precedes the command,
 // so no requester-supplied text can pick or push aside its own label.

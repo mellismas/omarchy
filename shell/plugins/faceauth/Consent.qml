@@ -23,7 +23,6 @@ Item {
   property string message: ""
   property var caller: ({})
   property real seconds: 0
-  property var blocked: ({})   // exe path -> until (ms since epoch)
 
   readonly property string fontFamily: Style.font.menuFamily
   readonly property color background: Color.polkit.background
@@ -45,7 +44,7 @@ Item {
   readonly property string requesterText: "Requester: " + String((root.caller || {}).who || "")
 
   // The window owns its own lifetime. A final state lingers long enough to be
-  // read (an approval briefly, a refusal longer so kill/block can still be
+  // read (an approval briefly, a refusal longer so kill can still be
   // used); a live state stays up for the daemon, and if the daemon dies or
   // its hide call is lost the window still closes itself.
   Timer {
@@ -68,14 +67,6 @@ Item {
     root.caller = payload.caller || {}
     root.seconds = Number(payload.seconds || 0)
     root.token = String(payload.token || "")
-    var exe = String(root.caller.exe || "")
-    var until = root.blocked[exe] || 0
-    if (exe.length > 0 && until > Date.now()) {
-      // Blocked earlier: kill without showing anything.
-      console.log("omarchy faceauth: blocked requester " + exe + ", killing pid " + root.caller.kill_pid)
-      root.killRequester()
-      return
-    }
     var first = !root.opened
     root.opened = true
     // Focus the password field on the first open only; a state change while
@@ -128,16 +119,6 @@ Item {
       killProc.running = true
     }
     root.close()
-  }
-
-  function blockRequester() {
-    var exe = String((root.caller || {}).exe || "")
-    if (exe.length > 0) {
-      var b = root.blocked
-      b[exe] = Date.now() + 10 * 60 * 1000
-      root.blocked = b
-    }
-    root.killRequester()
   }
 
   Process { id: killProc }
@@ -262,21 +243,15 @@ Item {
           anchors.right: parent.right
 
           Button {
+            // Only when the daemon could name the requester: for a plain
+            // polkit action there is no known process to end.
+            visible: root.verified
             text: "Deny and kill"
             bordered: true
             foreground: Color.polkit.textError
             accent: Color.polkit.textError
             fontFamily: root.fontFamily
             onClicked: root.killRequester()
-          }
-
-          Button {
-            text: "Block 10 min"
-            bordered: true
-            foreground: Color.polkit.textError
-            accent: Color.polkit.textError
-            fontFamily: root.fontFamily
-            onClicked: root.blockRequester()
           }
 
           Button {
