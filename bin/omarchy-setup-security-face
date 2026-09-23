@@ -134,7 +134,7 @@ if sudo faceauth enroll --user "$target_user"; then
     # and against what they do when not gesturing: two of each gesture and
     # three everyday movements, recorded and stored with the templates. A
     # miss here costs nothing (the defaults stay), so it never blocks setup.
-    echo -e "\nNow a short calibration: two nods, two head shakes, and three ordinary movements (reading, a glance down, talking).\n"
+    echo -e "\nNow a short calibration: two nods, two head shakes, and five ordinary movements (reading, a glance down, talking, leaning in, a look to the side).\n"
     sudo faceauth calibrate --user "$target_user" || true
     setup_pam_config
     setup_lock_face_pam
