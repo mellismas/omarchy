@@ -69,6 +69,12 @@ case $output in
   "Target not found." | "Function not found." | "Too few arguments provided"* | "Too many arguments provided"*)
     fail "$output"
     ;;
+  # summon and togglePanelAt answer "unknown" for a window the shell does not
+  # have (a disabled or absent plugin, an empty bar slot). Nothing was shown,
+  # and a caller that summoned something must not read the answer as shown.
+  "unknown")
+    fail "omarchy-shell has no such window"
+    ;;
   # A starting shell answers on stdout and exits 0, so a ping reads it as up
   # and the next call's answer as a result. It is as unreachable as none.
   "Not ready to accept queries yet"*)
