@@ -99,19 +99,51 @@ Item {
 
   // The face daemon's consent window names the request; polkit's helper
   // carries nothing about it, so the agent, which heard the action and the
-  // message from polkitd, tells the daemon as the request starts.
+  // message from polkitd, tells the daemon as the request starts. It must
+  // do so over its own connection, not through a child process: the daemon
+  // serves a context only to a request whose helper systemd says was
+  // connected by the very process that sent it, so a description planted
+  // by some other process of the user's never labels a request.
   function tellFaceauth() {
     var flow = polkitAgent ? polkitAgent.flow : null
     if (!flow) { console.log("omarchy polkit: no flow to tell faceauth about"); return }
     if (!faceConfigured) { console.log("omarchy polkit: face not configured, not telling faceauth"); return }
     console.log("omarchy polkit: telling faceauth about " + flow.actionId)
-    contextProc.command = ["faceauth", "consent-context", "--action", String(flow.actionId || ""), "--message", String(flow.message || ""), "--cookie", String(flow.cookie || "")]
-    contextProc.running = true
+    // polkitd attaches the pid of the process that asked it (from that
+    // process's D-Bus credentials) and of the process the authorization is
+    // for. A Quickshell that exposes the request's details passes them on;
+    // the daemon reads the requester from /proc itself and shows it as
+    // verified. Without them the card shows polkit's text, unverified.
+    var details = flow.details || {}
+    var context = {
+      user: String(Quickshell.env("USER") || ""),
+      context_action: String(flow.actionId || ""),
+      context_message: String(flow.message || ""),
+      context_cookie: String(flow.cookie || "")
+    }
+    var callerPid = parseInt(String(details["polkit.caller-pid"] || ""), 10)
+    var subjectPid = parseInt(String(details["polkit.subject-pid"] || ""), 10)
+    if (callerPid > 0) context.context_caller_pid = callerPid
+    if (subjectPid > 0) context.context_subject_pid = subjectPid
+    contextSocket.pending = JSON.stringify(context) + "\n"
+    contextSocket.connected = false
+    contextSocket.connected = true
   }
 
-  Process {
-    id: contextProc
-    onExited: (code, status) => console.log("omarchy polkit: faceauth consent-context exited " + code)
+  Socket {
+    id: contextSocket
+    path: "/run/faceauth/sock"
+    property string pending: ""
+    onConnectionStateChanged: {
+      if (!connected || pending.length === 0) return
+      write(pending)
+      flush()
+      pending = ""
+    }
+    parser: SplitParser {
+      onRead: line => { console.log("omarchy polkit: faceauth answered " + line); contextSocket.connected = false }
+    }
+    onError: error => console.log("omarchy polkit: faceauth socket error " + error)
   }
 
   function beginFlow() {
