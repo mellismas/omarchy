@@ -22,6 +22,7 @@ Item {
   property bool pendingSessionLock: false
   property bool authenticatingPassword: false
   property bool fingerprintAuthenticating: false
+  property bool faceAuthenticating: false
   property bool passwordPamConfigured: false
   property bool fingerprintConfigured: false
   property int fingerprintUnreachedStreak: 0
@@ -45,6 +46,7 @@ Item {
   property int fingerprintRetryBackoffMs: 0
   // Outputs the lock last saw, so only a display arriving counts as a wake.
   property int knownScreenCount: 0
+  property bool faceConfigured: false
   property bool previewVisible: false
   property string enteredPassword: ""
   property string pendingPassword: ""
@@ -69,6 +71,18 @@ Item {
   property bool strandedLock: false
   property bool strandedLockResolved: false
 
+  // After a few failed scans with the panel lit (nobody there), the loop
+  // stops scanning and probes instead, exactly as it does while blank.
+  property int faceFailures: 0
+  property bool faceProbeMode: false
+  // After three misses the probe stops waking or rescanning for the face
+  // that just failed: sitting back in view otherwise cycled the panel and
+  // spent the daemon's five tries a minute on scans that could not pass.
+  // The face has to leave and come back, or come noticeably closer.
+  property bool faceNeedsReturn: false
+  property real faceFailedPx: 0
+  property real faceLastProbePx: 0
+  readonly property string faceState: !faceConfigured ? "" : (faceAuthenticating ? "scanning" : (displaysBlank ? "probing" : "idle"))
   readonly property bool locked: lockRequested || sessionLock.locked || sessionLock.secure
 
   // Decisions read the lock state afresh. A property binding that missed a change
@@ -77,7 +91,7 @@ Item {
   function currentlyLocked() {
     return lockRequested || sessionLock.locked || sessionLock.secure
   }
-  readonly property bool authenticating: authenticatingPassword || fingerprintAuthenticating
+  readonly property bool authenticating: authenticatingPassword || fingerprintAuthenticating || faceAuthenticating
   readonly property var batteryService: shell && shell.services ? shell.firstPartyServiceFor("omarchy.battery") : null
   readonly property bool powerSaverActive: batteryService ? batteryService.powerSaverOnBattery : false
   // A prompt clears the unavailable notice before the attempt finishes.
@@ -199,6 +213,15 @@ Item {
     console.log("omarchy lock " + lastEventAt + " " + event)
   }
 
+  // The face lane logs to the console only. `lastEvent` is read back by the
+  // `lock status` IPC, which answers any process of this uid, and a probe
+  // verdict there ("attentive, waking", "present but not attentive") would
+  // tell such a process whether the owner is at the machine and looking at
+  // it while it is locked. The coarse `authenticating` flag is all it gets.
+  function logFaceEvent(event) {
+    console.log("omarchy lock " + new Date().toISOString() + " " + event)
+  }
+
   function resetAuthenticationState() {
     enteredPassword = ""
     pendingPassword = ""
@@ -219,8 +242,16 @@ Item {
     fingerprintRetryTimer.stop()
     fingerprintReachTimer.stop()
     fingerprintResumeTimer.stop()
+    faceAuthenticating = false
+    faceFailures = 0
+    faceProbeMode = false
+    faceNeedsReturn = false
+    faceFailedPx = 0
+    faceLastProbePx = 0
+    faceRetryTimer.stop()
     if (passwordPam.active) passwordPam.abort()
     if (fingerprintPam.active) fingerprintPam.abort()
+    if (facePam.active) facePam.abort()
   }
 
   function beginLock() {
@@ -269,6 +300,9 @@ Item {
     if (lockRequested) armBlankTimer()
     resumeFingerprint()
     nudgeFingerprint()
+    faceFailures = 0
+    faceProbeMode = false
+    startFace()
   }
 
   // An attempt already running is left to finish under its own timeouts, so
@@ -362,6 +396,11 @@ Item {
     root.displaysBlank = true
     root.monitorDpmsKnown = false
     pauseFingerprint()
+    // A face scan drives the IR camera and its illuminator while armed; a
+    // blanked panel means nobody is in front of it, so stop until wake.
+    faceRetryTimer.stop()
+    faceAuthenticating = false
+    if (facePam.active) facePam.abort()
     if (!blankProcess.running) blankProcess.running = true
   }
 
@@ -499,6 +538,56 @@ Item {
     }
   }
 
+  // Face authentication: a third PAM stack, omarchy-lock-face, on its own lane
+  // like the fingerprint one. Typing a password preempts nothing here because
+  // the daemon answers within its own timeout; the stacks run independently.
+  // When the daemon answers at once (a cooldown hold, a busy camera, an
+  // error) an attempt costs twenty milliseconds, and any path that starts
+  // the next one on completion would spin. No scan starts within a second
+  // of the last start; the retry timer takes it instead.
+  property double lastFaceStartAt: 0
+
+  function startFace() {
+    if (!lockRequested || !sessionLock.secure || !faceConfigured) return
+    if (displaysBlank || faceProbeMode) return
+    if (facePam.active || faceAuthenticating) return
+    if (Date.now() - lastFaceStartAt < 1000) {
+      faceRetryTimer.restart()
+      return
+    }
+    lastFaceStartAt = Date.now()
+
+    faceAuthenticating = true
+    if (!facePam.start()) {
+      faceAuthenticating = false
+      logFaceEvent("face-start-failed")
+      return
+    }
+    logFaceEvent("face-started")
+  }
+
+  function handleFaceFinished(result) {
+    faceAuthenticating = false
+    logFaceEvent("face-finished: " + (result === PamResult.Success ? "success" : "result=" + result))
+
+    if (!lockRequested) return
+    if (result === PamResult.Success) {
+      finishUnlock()
+    } else if (faceConfigured && !displaysBlank) {
+      faceFailures += 1
+      // Three misses with the panel lit means nobody is there: stop scanning
+      // (camera and illuminator) and let the cheap probe watch for a return.
+      if (faceFailures >= 3) {
+        faceProbeMode = true
+        faceNeedsReturn = true
+        faceFailedPx = faceLastProbePx
+        logFaceEvent("face-probe-mode: on")
+      } else {
+        faceRetryTimer.restart()
+      }
+    }
+  }
+
   WlSessionLock {
     id: sessionLock
 
@@ -511,6 +600,7 @@ Item {
         sessionLockStabilizeTimer.stop()
         pendingSessionLockTimer.stop()
         root.startFingerprint()
+        root.startFace()
       }
     }
 
@@ -549,6 +639,8 @@ Item {
         backgroundVersion: root.backgroundVersion
         fingerprintConfigured: root.fingerprintConfigured || root.fingerprintUnavailable
         fingerprintUnavailable: root.fingerprintUnavailable
+        faceConfigured: root.faceConfigured
+        faceState: root.faceState
         authenticatingPassword: root.authenticatingPassword
         failureMessage: root.failureMessage
         failedAttempts: root.failedAttempts
@@ -587,6 +679,8 @@ Item {
       backgroundVersion: root.backgroundVersion
       fingerprintConfigured: root.fingerprintConfigured || root.fingerprintUnavailable
       fingerprintUnavailable: root.fingerprintUnavailable
+      faceConfigured: root.faceConfigured
+      faceState: root.faceState
       authenticatingPassword: false
       failureMessage: ""
       failedAttempts: 0
@@ -723,6 +817,102 @@ Item {
     onTriggered: root.timeoutFingerprintReach()
   }
 
+  PamContext {
+    id: facePam
+    config: "omarchy-lock-face"
+    user: root.userName
+
+    onCompleted: function(result) {
+      root.handleFaceFinished(result)
+    }
+
+    onError: function(error) {
+      root.faceAuthenticating = false
+      root.logFaceEvent("face-error: " + error)
+      if (root.lockRequested && root.faceConfigured && !root.displaysBlank) faceRetryTimer.restart()
+    }
+  }
+
+  // While the panel is blank the scan loop is off (it would run the camera and
+  // its illuminator all night). Instead the daemon is asked every few seconds
+  // for one short look, detector only; a face wakes the panel, and the wake
+  // starts the scan. Sitting back down opens the screen with nothing touched.
+  Timer {
+    id: faceProbeTimer
+    interval: 3000
+    repeat: true
+    running: root.lockRequested && (root.displaysBlank || root.faceProbeMode) && root.faceConfigured && !root.previewVisible
+    triggeredOnStart: true
+    onTriggered: {
+      if (!faceProbeProc.running) faceProbeProc.running = true
+    }
+  }
+
+  Process {
+    id: faceProbeProc
+    command: ["/usr/bin/faceauth", "probe", "--user", root.userName]
+    stdout: StdioCollector {
+      id: faceProbeStdout
+      waitForEnd: true
+    }
+    onExited: {
+      var text = String(faceProbeStdout.text || "")
+      if (!root.lockRequested || !(root.displaysBlank || root.faceProbeMode)) return
+      // Wake a blank panel only for a face turned towards the screen; a
+      // face merely in view (someone at the next desk, a glance past the
+      // machine) leaves it dark. A lit panel scans on any face.
+      var present = text.indexOf('"face":true') !== -1
+      var attentive = text.indexOf('"attentive":true') !== -1
+      var info = {}
+      try { info = JSON.parse(text) } catch (e) { info = {} }
+      // A face too far to judge wakes nothing: its scan cannot pass and
+      // would spend one of the daemon's tries. A daemon without the field
+      // answers as before.
+      var scannable = info.scannable !== false
+      var facePx = Number(info.face_px || 0)
+      if (!present) root.faceNeedsReturn = false
+      if (present && root.faceNeedsReturn && !(root.faceFailedPx > 0 && facePx >= root.faceFailedPx * 1.25)) {
+        root.logFaceEvent("face-probe: the face that just failed, no closer; staying " + (root.displaysBlank ? "dark" : "idle"))
+        return
+      }
+      if (present && !scannable) {
+        root.logFaceEvent("face-probe: too far to judge (" + Math.round(facePx) + " px); staying " + (root.displaysBlank ? "dark" : "idle"))
+        return
+      }
+      if (present) root.faceLastProbePx = facePx
+      if (present && (attentive || !root.displaysBlank)) {
+        root.faceNeedsReturn = false
+        root.logFaceEvent("face-probe: " + (attentive ? "attentive" : "present") + ", " + (root.displaysBlank ? "waking" : "scanning"))
+        if (root.displaysBlank) root.runWake()
+        else { root.faceProbeMode = false; root.faceFailures = 0; root.startFace() }
+      } else if (present) {
+        root.logFaceEvent("face-probe: present but not attentive, staying dark")
+      }
+    }
+  }
+
+  // An attempt that failed has already spent the daemon's own timeout; this only
+  // spaces the retries. The daemon reports "no face" in about a second when the
+  // seat is empty, so an empty desk costs one short attempt every 1.5 s until
+  // the panel blanks, and nothing after that.
+  Timer {
+    id: faceRetryTimer
+    interval: 1500
+    repeat: false
+    onTriggered: root.startFace()
+  }
+
+  // Setup writes this PAM service only once a face is enrolled, so its presence
+  // is the "configured" check (the templates themselves are root-only).
+  FileView {
+    path: "/etc/pam.d/omarchy-lock-face"
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.faceConfigured = true
+    onLoadFailed: root.faceConfigured = false
+    onFileChanged: reload()
+  }
+
   Process {
     id: readlinkProc
     command: ["bash", "-c", "path=$(readlink -f -- \"$1\") && printf '%s\\n%s\\n' \"$path\" \"$(stat -Lc %Y:%s -- \"$path\" 2>/dev/null)\"", "_", root.currentBackgroundLink]
@@ -841,9 +1031,15 @@ Item {
         root.armBlankTimer()
         return
       }
-      // Only a password check in flight should hold the display up. The
-      // fingerprint PAM stays armed for the whole lock, so gating on
-      // `authenticating` here would keep the panel lit until unlock.
+      // A password check in flight holds the display up, and so does a face
+      // attempt or its retry: blanking cancelled the scan mid-attempt and the
+      // probe woke the panel again, one attempt per wake. The three-miss rule
+      // still ends the face loop. The fingerprint PAM stays armed for the
+      // whole lock, so gating on `authenticating` would keep it lit forever.
+      if (root.faceAuthenticating || faceRetryTimer.running) {
+        root.armBlankTimer()
+        return
+      }
       if (root.lockRequested && !root.authenticatingPassword) root.runBlank()
     }
   }
@@ -950,6 +1146,9 @@ Item {
       return root.currentlyLocked() ? "true" : "false"
     }
 
+    // Same-uid callers read this. Lock lifecycle only: the face lane never
+    // writes `lastEvent` (see logFaceEvent), so nothing here says whether a
+    // face is in front of the camera.
     function status(): string {
       return JSON.stringify({
         locked: root.currentlyLocked(),
