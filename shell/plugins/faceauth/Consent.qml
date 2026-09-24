@@ -37,8 +37,8 @@ Item {
   readonly property color scrim: Color.menu.scrim
   readonly property var borderSpec: Border.surfaceSpec("menu", "border", Color.menu.border, Math.max(1, Style.space(2)), "border-alpha")
   readonly property int cornerRadius: Style.cornerRadius
-  // Wide enough for the answer buttons to sit on one line without wrapping
-  // or crowding.
+  // Wide enough for the passwordless row and the three answer buttons to
+  // sit on their own lines without wrapping or crowding.
   readonly property int cardWidth: Math.min(Style.space(760), panel.width - Style.gapsOut * 2)
 
   // Line 1: what is being asked. `verified` is true when the daemon read the
@@ -48,8 +48,9 @@ Item {
   readonly property bool verified: (root.caller || {}).verified === true
   // Once a passwordless rider is armed, what the nod approves includes
   // it, so the line the user reads says so. The rider comes from the
-  // daemon's payload: the card shows what the daemon will grant, and
-  // nothing armed over the socket can hide from the card.
+  // daemon's payload, never from this card's own button press: the card
+  // shows what the daemon will grant, and nothing armed over the socket
+  // can hide from the card.
   // The command is appended in code, never through .arg(), so a translation
   // can relabel the line but cannot drop what it runs.
   readonly property string commandLine: (root.verified ? Commons.I18n.t("faceConsent.runAsRoot") : Commons.I18n.t("faceConsent.unverified")) + " " + String((root.caller || {}).command || "") + (root.passwordlessArmed.length > 0 ? "  " + Commons.I18n.t("faceConsent.passwordlessRider").arg(root.passwordlessArmed) : "") + ((root.caller || {}).clipped === true ? "  " + Commons.I18n.t("faceConsent.commandClipped") : "")
@@ -92,11 +93,12 @@ Item {
     autoClose.restart()
     root.message = String(payload.message || "")
     root.caller = payload.caller || {}
-    // The rider, as the daemon knows it. A payload that changes the rider
-    // is a card the user has not read yet: the daemon reads no nod until
-    // this window acknowledges it again.
+    // The rider and the face, as the daemon knows them. A payload that
+    // changes the rider is a card the user has not read yet: the daemon
+    // reads no nod until this window acknowledges it again.
     var riderChanged = Number(payload.passwordless_minutes || 0) !== root.riderMinutes
     root.riderMinutes = Number(payload.passwordless_minutes || 0)
+    root.facePresent = payload.face_present === true
     root.waiting = payload.waiting === true
     root.opened = true
     if (fresh) {
@@ -183,11 +185,34 @@ Item {
     }
   }
 
-  // From the payload: the minutes of passwordless sudo the daemon has
-  // armed on this request, if any. The daemon takes a rider only for the
-  // enrolled face at a sudo card, and this card shows whatever it reports.
+  // Passwordless sudo for a while, from the card. The button approves
+  // nothing on its own: it tells the daemon, with this request's token,
+  // that the approval of this request should also turn passwordless sudo
+  // on for the minutes typed. The nod (or the password) that approves the
+  // request is the only consent; nothing else appears, and the daemon
+  // writes the same rule and expiry timer Omarchy's own command would.
+  // Only on a sudo request: polkit is not covered by the sudoers rule.
+  // The button is greyed unless the daemon says the enrolled face is in
+  // frame right now (`face_present` in the payload); the daemon refuses
+  // an arm otherwise too, so the socket is no wider than the button.
+  readonly property bool sudoRequest: String((root.caller || {}).via || "") === "sudo" && !/(^|[\s\/])omarchy-sudo-passwordless(\s|$)/.test(String((root.caller || {}).command || ""))
+  readonly property string passwordlessMinutes: {
+    var m = parseInt(String(minutesField.text || "").trim(), 10)
+    return (m > 0 && m <= 1440) ? String(m) : ""
+  }
+  // From the payload: the minutes the daemon has armed on this request,
+  // and whether the enrolled face is in the nod window now.
   property int riderMinutes: 0
+  property bool facePresent: false
   readonly property string passwordlessArmed: root.riderMinutes > 0 ? String(root.riderMinutes) : ""
+  // Omarchy's own command says this before it turns the rule on; the card
+  // says the same, in the same words.
+  readonly property string passwordlessWarning: Commons.I18n.t("faceConsent.passwordlessWarning").arg(root.passwordlessArmed.length > 0 ? root.passwordlessArmed : (root.passwordlessMinutes.length > 0 ? root.passwordlessMinutes : "?"))
+
+  function armPasswordless() {
+    if (root.passwordlessMinutes.length === 0 || !root.pending || !root.facePresent) return
+    root.answer(["--passwordless", root.passwordlessMinutes], "")
+  }
 
   function killRequester() {
     var pid = Number((root.caller || {}).kill_pid || 0)
@@ -337,11 +362,77 @@ Item {
           Keys.onEscapePressed: root.close()
         }
 
-        // One line: the answer buttons on the right, centred on the same
-        // axis.
+        // Upstream's warning, shown while the user is at the minutes field
+        // and for as long as a rider is armed.
+        Text {
+          id: passwordlessWarningText
+          width: parent.width
+          visible: root.sudoRequest && root.pending && (root.passwordlessArmed.length > 0 || minutesField.activeFocus)
+          text: root.passwordlessWarning
+          textFormat: Text.PlainText
+          color: root.foreground
+          opacity: 0.9
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+        }
+
+        // One line: the passwordless controls on the left, set apart from
+        // the answer buttons on the right, all centred on the same axis.
         Item {
           width: parent.width
-          height: answerRow.implicitHeight
+          height: Math.max(passwordlessRow.implicitHeight, answerRow.implicitHeight)
+
+          Row {
+            id: passwordlessRow
+            spacing: Style.spacing.sm
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            visible: root.sudoRequest && root.pending
+
+            TextField {
+              id: minutesField
+              // Room for three digits, up to a day.
+              width: Style.space(52)
+              visible: root.passwordlessArmed.length === 0
+              enabled: root.facePresent
+              opacity: root.facePresent ? 1.0 : 0.4
+              anchors.verticalCenter: parent.verticalCenter
+              text: "15"
+              placeholderText: "min"
+              foreground: root.foreground
+              accent: root.accent
+              font.family: root.fontFamily
+              onAccepted: root.armPasswordless()
+              Keys.onEscapePressed: root.close()
+            }
+
+            Button {
+              visible: root.passwordlessArmed.length === 0
+              // Greyed until the daemon reports the enrolled face in frame:
+              // the person at the camera arms it, nothing else does.
+              enabled: root.passwordlessMinutes.length > 0 && root.facePresent
+              opacity: root.facePresent ? 1.0 : 0.4
+              anchors.verticalCenter: parent.verticalCenter
+              text: root.facePresent ? Commons.I18n.t("faceConsent.passwordlessFor").arg(root.passwordlessMinutes.length > 0 ? root.passwordlessMinutes : "?") : Commons.I18n.t("faceConsent.passwordlessLook")
+              bordered: true
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.fontFamily
+              onClicked: root.armPasswordless()
+            }
+
+            Text {
+              visible: root.passwordlessArmed.length > 0
+              anchors.verticalCenter: parent.verticalCenter
+              text: Commons.I18n.t("faceConsent.passwordlessArmed").arg(root.passwordlessArmed)
+              textFormat: Text.PlainText
+              color: root.accent
+              opacity: 0.8
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+          }
 
           Row {
             id: answerRow

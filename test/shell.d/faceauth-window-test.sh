@@ -25,19 +25,47 @@ const commands = [...consent.matchAll(/command\s*[=:]\s*\[\s*"([^"]*)"/g)].map(m
 assert(commands.length >= 2, 'the consent window spawns processes', String(commands))
 assert(commands.every(c => c === '/usr/bin/faceauth' || c === '/usr/bin/kill'), 'every spawned binary is /usr/bin/faceauth or /usr/bin/kill', String(commands))
 
-// A passwordless-sudo rider the daemon reports on the request shows on
-// the card: the armed minutes come from the payload, never from the card's
-// own state, so nothing armed over the socket can hide from the user.
+// The passwordless button approves nothing on its own: it asks the daemon,
+// with the request's token, to turn passwordless sudo on when this request
+// is approved. The nod stays the only consent; nothing else is spawned.
+const pl = consent.match(/function armPasswordless\(\) \{([\s\S]*?)\n  \}/)
+assert(pl, 'the card has a passwordless button')
+assert(/root\.answer\(\["--passwordless", root\.passwordlessMinutes\], ""\)/.test(pl[1]), 'it sends the minutes to the daemon as an answer carrying the token')
+assert(/if \(root\.passwordlessMinutes\.length === 0 \|\| !root\.pending \|\| !root\.facePresent\) return/.test(pl[1]), 'it does nothing without minutes, without a pending request, or without the face in frame')
+// The rider row is the daemon's, not the card's: the armed minutes come
+// from the payload and the button press sets nothing locally, so the card
+// always shows what the nod will grant, whoever armed it over the socket.
 assert(!/root\.passwordlessArmed = /.test(consent), 'the card never sets the armed minutes itself')
 assert(/readonly property string passwordlessArmed: root\.riderMinutes > 0 \? String\(root\.riderMinutes\) : ""/.test(consent), 'the armed minutes are read from the payload-driven riderMinutes')
 assert(/root\.riderMinutes = Number\(payload\.passwordless_minutes \|\| 0\)/.test(consent), 'open() reads the rider from payload.passwordless_minutes')
+assert(/root\.facePresent = payload\.face_present === true/.test(consent), 'open() reads the face from payload.face_present, true only when the daemon says so')
 assert(/var riderChanged = Number\(payload\.passwordless_minutes \|\| 0\) !== root\.riderMinutes/.test(consent), 'a payload that changes the rider is noticed')
 assert(/if \(token\.length > 0 && \(fresh \|\| riderChanged\)\) root\.answer\(\["--ack"\], ""\)/.test(consent), 'a changed rider is acknowledged afresh, so the daemon starts the dwell over')
+// The control is greyed and unclickable unless the enrolled face is on screen.
+const plButton = consent.split(/\bButton \{/).slice(1).find(b => /faceConsent\.passwordlessFor/.test(b))
+assert(plButton, 'the card has the passwordless button')
+assert(/enabled: root\.passwordlessMinutes\.length > 0 && root\.facePresent/.test(plButton), 'the passwordless button is enabled only with minutes and the face in frame')
+assert(/opacity: root\.facePresent \? 1\.0 : 0\.4/.test(plButton), 'the passwordless button is greyed without the face')
+assert(/faceConsent\.passwordlessLook/.test(plButton) && /look at the camera/.test(enShell['faceConsent.passwordlessLook']), 'the greyed button says why')
+const minutesBlock = consent.split(/\bTextField \{/).slice(1).find(b => /id: minutesField/.test(b)) || ''
+assert(/enabled: root\.facePresent/.test(minutesBlock), 'the minutes field is disabled without the face')
+// Upstream's warning, in its own words (bin/omarchy-sudo-passwordless).
+assert(/passwordlessWarning: Commons\.I18n\.t\("faceConsent\.passwordlessWarning"\)\.arg\(/.test(consent) && /^WARNING: This will allow ANY process running as your user to execute ANY command as root WITHOUT a password for %1 minutes\. /.test(enShell['faceConsent.passwordlessWarning']), 'the card carries upstream\'s passwordless warning verbatim')
+assert(/Anyone or anything with access to your user account gets full root\.$/.test(enShell['faceConsent.passwordlessWarning']), 'and its second sentence')
+const warnBlock = consent.split(/\bText \{/).slice(1).find(b => /id: passwordlessWarningText/.test(b)) || ''
+assert(/visible: root\.sudoRequest && root\.pending && \(root\.passwordlessArmed\.length > 0 \|\| minutesField\.activeFocus\)/.test(warnBlock), 'the warning shows while arming and for as long as a rider is armed')
+assert(!/root\.close\(\)/.test(pl[1]) && !/--dismiss/.test(pl[1]), 'it neither dismisses nor closes the request on screen')
+assert(!commands.some(c => /passwordless|terminal/.test(c)) && !/floating-terminal/.test(consent), 'no command and no terminal are spawned for it')
+assert(/readonly property bool sudoRequest: String\(\(root\.caller \|\| \{\}\)\.via \|\| ""\) === "sudo" && !\/.*omarchy-sudo-passwordless/.test(consent), 'it is keyed on the daemon-read via, sudo only, and not on the passwordless command\'s own card')
+assert(/visible: root\.sudoRequest && root\.pending/.test(consent), 'it shows only on a pending sudo request')
 const rows = consent.split(/\n\s*Row \{/).slice(1)
+const plRow = rows.find(r => /id: passwordlessRow/.test(r)) || ''
 const answerRow = rows.find(r => /id: answerRow/.test(r)) || ''
+assert(/anchors\.left: parent\.left/.test(plRow) && /anchors\.verticalCenter: parent\.verticalCenter/.test(plRow), 'the passwordless controls sit on the left, centred on the line')
 assert(/anchors\.right: parent\.right/.test(answerRow) && /anchors\.verticalCenter: parent\.verticalCenter/.test(answerRow), 'the answer buttons sit on the right of the same line, centred')
 assert(!/passwordlessArmed/.test(consent.match(/if \(fresh\) \{([\s\S]*?)\n    \}/)[1]), 'a new request carries nothing armed of its own; the payload decides')
 assert(/\+ \(root\.passwordlessArmed\.length > 0 \? "  " \+ Commons\.I18n\.t\("faceConsent\.passwordlessRider"\)\.arg\(root\.passwordlessArmed\) : ""\)/.test(consent.split('\n').find(l => /readonly property string commandLine:/.test(l)) || '') && enShell['faceConsent.passwordlessRider'] === 'and passwordless sudo for %1 min', 'once armed, the command line the user reads includes the passwordless spell')
+assert(/faceConsent\.passwordlessArmed/.test(consent) && /^Passwordless sudo armed: %1 min/.test(enShell['faceConsent.passwordlessArmed']), 'once armed the button gives way to a note')
 assert(/\(root\.caller \|\| \{\}\)\.clipped === true \? "  " \+ Commons\.I18n\.t\("faceConsent\.commandClipped"\) : ""/.test(consent) && enShell['faceConsent.commandClipped'] === '[command too long to show in full]', 'a command the daemon cut is marked as such on the line the user reads')
 
 // Approve is the mouse form of Enter: it submits the typed password only.
