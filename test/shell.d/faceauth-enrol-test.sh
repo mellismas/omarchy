@@ -21,7 +21,7 @@ assert(/path: "\/run\/faceauth\/sock"/.test(qml), 'the socket is the daemon\'s')
 // No image of any kind: the window draws a dot and a ring from the pose
 // stream, and nothing is ever asked of the daemon but that stream.
 const code = qml.replace(/\/\/.*$/gm, '')
-assert(!/Image \{|image|frame|jpeg|png|ppm|base64/i.test(code), 'no camera image is drawn or requested')
+assert(!/Image \{|source:|jpeg|png|ppm|base64|enrol_frame/i.test(code), 'no camera image is drawn or requested')
 
 const commands = [...qml.matchAll(/command\s*[=:]\s*\[\s*"([^"]*)"/g)].map(m => m[1])
 assert(commands.length === 1 && commands[0] === '/usr/bin/faceauth', 'the only process spawned is /usr/bin/faceauth', String(commands))
@@ -35,4 +35,10 @@ assert(/width: root\.ringRadius \* 0\.70/.test(qml), 'the target circle is drawn
 assert(/readonly property real dotRadius: [\s\S]*root\.size/.test(qml), 'the dot\'s size follows the distance')
 assert(/screen: root\.cameraScreen/.test(qml), 'the window is drawn on the camera\'s screen')
 assert(/WlrLayershell\.namespace: "omarchy-faceauth-enrol"/.test(qml), 'the layer has its own namespace for a layer rule')
+
+// The rounds: the reading texts are placed around the screen, one at a
+// time as the daemon says, and the card shows the round and its clock.
+assert(/root\.round === "read" && !root\.countdown && root\.readSlot === index/.test(qml), 'the reading text shows one slot at a time, as the daemon streams it')
+assert(/Round " \+ root\.roundNo \+ " of " \+ root\.roundOf/.test(qml), 'the card names the round')
+assert(/visible: root\.step === "welcome" \|\| root\.step === "bridge"/.test(qml), 'Continue also starts the rounds from the bridge')
 JS

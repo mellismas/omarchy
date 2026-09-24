@@ -34,6 +34,20 @@ Item {
   property int taken: 0
   property int wanted: 0
   property string message: ""
+  // The gesture and everyday rounds after the looks.
+  property string round: ""
+  property int roundNo: 0
+  property int roundOf: 0
+  property real secondsLeft: 0
+  property bool countdown: false
+  property int readSlot: -1
+  readonly property var readTexts: [
+    "The camera reads your head, never your eyes.",
+    "Nothing here is stored as an image.",
+    "A nod approves. A shake refuses.",
+    "Ordinary reading must never count as either.",
+    "That is what this round is for."
+  ]
 
   readonly property string fontFamily: Style.font.menuFamily
   readonly property color background: Color.menu.background
@@ -56,6 +70,11 @@ Item {
   // distance, grows past it too close, shrinks too far.
   readonly property real dotRadius: Style.space(14) * Math.max(0.5, Math.min(2.0, root.size / 0.19))
   readonly property bool showRing: root.step === "centre" || root.step === "range" || root.step === "path" || root.step === "hold" || root.step === "verify" || root.step === "record"
+  readonly property bool inRound: root.step === "round"
+  // The round's whole length, from the first seconds-left reading it sends.
+  property real roundSeconds: 0
+  onSecondsLeftChanged: if (!root.countdown && root.secondsLeft > root.roundSeconds) root.roundSeconds = root.secondsLeft
+  onRoundNoChanged: root.roundSeconds = 0
   // The dashed circle: at the centre while the centre is learned, then
   // wherever the daemon walks it.
   readonly property bool showTarget: root.step === "centre" || root.step === "path" || root.step === "hold"
@@ -112,6 +131,12 @@ Item {
         root.taken = Number(t.taken || 0)
         root.wanted = Number(t.wanted || 0)
         root.message = String(t.message || "")
+        root.round = String(t.round || "")
+        root.roundNo = Number(t.round_no || 0)
+        root.roundOf = Number(t.round_of || 0)
+        root.secondsLeft = Number(t.seconds_left || 0)
+        root.countdown = !!t.countdown
+        root.readSlot = (t.read_slot === null || t.read_slot === undefined) ? -1 : Number(t.read_slot)
         if (root.step === "done" || root.step === "failed") doneTimer.restart()
       }
     }
@@ -145,6 +170,23 @@ Item {
 
     Rectangle { anchors.fill: parent; color: root.scrim }
 
+    // The reading round: one short text at a time, placed around the
+    // screen so the eyes and head move the way they do when reading.
+    Repeater {
+      model: 5
+      Text {
+        required property int index
+        visible: root.inRound && root.round === "read" && !root.countdown && root.readSlot === index
+        text: root.readTexts[index]
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.title
+        font.bold: true
+        x: index === 0 || index === 3 ? Style.gapsOut * 2 : (index === 4 ? (panel.width - width) / 2 : panel.width - width - Style.gapsOut * 2)
+        y: index === 0 || index === 1 ? Style.gapsOut * 2 + Style.space(40) : (index === 4 ? panel.height - height - Style.gapsOut * 2 - Style.space(40) : panel.height - height - Style.gapsOut * 2 - Style.space(120))
+      }
+    }
+
 
     BorderSurface {
       id: card
@@ -152,7 +194,9 @@ Item {
       height: column.implicitHeight + Style.spacing.panelPadding * 2
       radius: root.cornerRadius
       anchors.centerIn: parent
-      color: Qt.rgba(root.background.r, root.background.g, root.background.b, 0.45)
+      // Translucent enough to see the ring's surroundings, opaque enough
+      // to read the round's prompt over whatever is behind.
+      color: Qt.rgba(root.background.r, root.background.g, root.background.b, 0.85)
       borderSpec: root.borderSpec
       padding: Style.spacing.panelPadding
 
@@ -188,6 +232,37 @@ Item {
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
           wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+        }
+
+        // A round: which one, and a bar running down as it records.
+        Item {
+          width: parent.width
+          height: root.inRound ? Style.space(36) : 0
+          visible: root.inRound
+
+          Text {
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.countdown ? ("Round " + root.roundNo + " of " + root.roundOf + ": starting") : ("Round " + root.roundNo + " of " + root.roundOf + ": recording, " + Math.ceil(root.secondsLeft) + " s")
+            color: root.countdown ? root.foreground : root.accent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Rectangle {
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            width: Style.space(200)
+            height: Style.space(6)
+            radius: height / 2
+            color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.2)
+            Rectangle {
+              height: parent.height
+              radius: parent.radius
+              width: parent.width * (root.countdown ? 0 : Math.max(0, Math.min(1, 1 - root.secondsLeft / Math.max(1, root.roundSeconds))))
+              color: root.accent
+            }
+          }
         }
 
         // The ring, the target and the dot.
@@ -282,7 +357,7 @@ Item {
           }
 
           Button {
-            visible: root.step === "range" || root.step === "path" || root.step === "hold"
+            visible: root.step === "range" || root.step === "path" || root.step === "hold" || root.step === "round"
             text: "Redo this one"
             bordered: true
             foreground: root.foreground
@@ -292,7 +367,7 @@ Item {
           }
 
           Button {
-            visible: root.step === "welcome"
+            visible: root.step === "welcome" || root.step === "bridge"
             text: "Continue"
             bordered: true
             foreground: root.accent

@@ -202,7 +202,10 @@ grep -q '^auth      sufficient pam_faceauth.so' "$pamd/sudo" || fail "the sudo c
 [[ -f $pamd/polkit-1 && -f $backups/polkit-1.created-by-faceauth ]] || fail "setup creates polkit-1 when absent and remembers that it did"
 grep -q 'pam_faceauth.so' "$pamd/polkit-1" || fail "the created polkit-1 carries the consent line"
 grep -q '^auth      \[success=done auth_err=die default=ignore\] pam_faceauth.so' "$pamd/polkit-1" || fail "the polkit consent line ends the stack on the user's no so the agent can cancel" "$(cat "$pamd/polkit-1")"
-grep -q $'faceauth\tcalibrate' "$calls" || fail "setup records the person's gestures" "$(cat "$calls")"
+# The walk-through records the gestures after the looks, in the same run
+# as the enrolment; setup no longer makes a separate calibration call.
+grep -q $'faceauth\tenroll.*--guided' "$calls" || fail "setup enrols through the walk-through, which records the person's gestures" "$(cat "$calls")"
+grep -q $'faceauth\tcalibrate' "$calls" && fail "setup makes no separate calibration call" "$(cat "$calls")"
 pass "setup installs, enrols, verifies, and only then writes the lock-face PAM service"
 
 # Never under sudo: the enrolment would be root's. EUID is read-only in

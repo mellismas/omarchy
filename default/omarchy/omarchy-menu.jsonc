@@ -183,7 +183,7 @@
   "setup.security.face": {"icon":"󰙃","label":"Face","when":"omarchy-hw-ir-camera"},
   "setup.security.face.enroll": {"icon":"󰙃","label":"Enroll","action":"omarchy-launch-floating-terminal-with-presentation omarchy-setup-security-face"},
   "setup.security.face.add": {"icon":"","label":"Add Look","when":"omarchy-pkg-present omarchy-faceauth","action":"omarchy-launch-floating-terminal-with-presentation omarchy-setup-security-face-add"},
-  "setup.security.face.gestures": {"icon":"󰖎","label":"Tune Gestures","when":"omarchy-pkg-present omarchy-faceauth","action":"omarchy-launch-floating-terminal-with-presentation 'sudo faceauth calibrate'"},
+  "setup.security.face.gestures": {"icon":"󰖎","label":"Tune Gestures","when":"omarchy-pkg-present omarchy-faceauth","action":"omarchy-launch-floating-terminal-with-presentation 'sudo faceauth calibrate --guided'"},
   "setup.security.face.lock": {"icon":"","label":"Walk-Away Lock","when":"omarchy-pkg-present omarchy-faceauth"},
   "setup.security.face.lock.off": {"icon":"󰌾","label":"Off","action":"omarchy-launch-floating-terminal-with-presentation 'sudo faceauth presence off'"},
   "setup.security.face.lock.20": {"icon":"󰌾","label":"After 20 seconds","action":"omarchy-launch-floating-terminal-with-presentation 'sudo faceauth presence on --away-seconds 20'"},
