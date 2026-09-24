@@ -40,7 +40,7 @@ Item {
   property bool laptopClosed: false
   property int shakeOffset: 0
 
-  readonly property bool dialogVisible: polkitAgent.isActive || closing
+  readonly property bool dialogVisible: agentActive || closing
   // We show one method at a time. Fingerprint owns the dialog while PAM is
   // waiting on the reader (lid open, sensor enrolled); the moment PAM asks for
   // a password — including immediately when the lid is shut and the clamshell
@@ -76,7 +76,7 @@ Item {
   }
 
   function syncFromFlow() {
-    var flow = polkitAgent.flow
+    var flow = polkitAgent ? polkitAgent.flow : null
     if (!flow) return
 
     currentMessage = String(flow.message || "")
@@ -108,7 +108,7 @@ Item {
   }
 
   function submitResponse() {
-    var flow = polkitAgent.flow
+    var flow = polkitAgent ? polkitAgent.flow : null
     if (!flow || !flow.isResponseRequired) return
     submitted = true
     errorFlash = false
@@ -118,7 +118,7 @@ Item {
   }
 
   function cancelRequest() {
-    var flow = polkitAgent.flow
+    var flow = polkitAgent ? polkitAgent.flow : null
     passwordInput.text = ""
     submitted = false
     closing = true
@@ -174,27 +174,52 @@ Item {
     onExited: root.laptopClosed = String(laptopClosedOut.text || "").trim() === "closed"
   }
 
-  PolkitAgent {
-    id: polkitAgent
-    path: "/org/omarchy/PolkitAgent"
+  // The agent lives in a Loader so it can be made again: Quickshell asks
+  // polkit for the agent slot once, when the object is created, and never
+  // again. A shell relaunched by its crash handler asks while the crashed
+  // instance is still being dumped and still holds the slot, loses, and
+  // from then on every pkexec fails for want of an agent. So while the
+  // agent is not registered, make a fresh one every few seconds.
+  readonly property var polkitAgent: agentLoader.item
+  readonly property bool agentActive: !!polkitAgent && polkitAgent.isActive
+  readonly property bool agentRegistered: !!polkitAgent && polkitAgent.isRegistered
 
-    onAuthenticationRequestStarted: root.beginFlow()
-    onIsActiveChanged: {
-      if (isActive) root.syncFromFlow()
-      else if (!root.closing) root.resetSnapshot()
+  Loader {
+    id: agentLoader
+    active: true
+    sourceComponent: PolkitAgent {
+      path: "/org/omarchy/PolkitAgent"
+
+      onAuthenticationRequestStarted: root.beginFlow()
+      onIsActiveChanged: {
+        if (isActive) root.syncFromFlow()
+        else if (!root.closing) root.resetSnapshot()
+      }
+      onIsRegisteredChanged: {
+        if (isRegistered) console.log("omarchy polkit agent registered")
+        else console.warn("omarchy polkit agent is not registered; another agent may be running, retrying")
+      }
     }
-    onIsRegisteredChanged: {
-      if (isRegistered) console.log("omarchy polkit agent registered")
-      else console.warn("omarchy polkit agent is not registered; another agent may be running")
+  }
+
+  Timer {
+    id: registerRetry
+    interval: 3000
+    repeat: true
+    running: !root.agentRegistered && !root.agentActive
+    onTriggered: {
+      if (root.agentRegistered) return
+      agentLoader.active = false
+      agentLoader.active = true
     }
   }
 
   Connections {
-    target: polkitAgent.flow
+    target: polkitAgent ? polkitAgent.flow : null
 
     function onIsResponseRequiredChanged() {
       root.syncFromFlow()
-      if (!polkitAgent.flow || !polkitAgent.flow.isResponseRequired) passwordInput.text = ""
+      if (!polkitAgent || !polkitAgent.flow || !polkitAgent.flow.isResponseRequired) passwordInput.text = ""
       Qt.callLater(root.refocus)
     }
 
