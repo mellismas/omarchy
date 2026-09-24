@@ -1,0 +1,37 @@
+#!/bin/bash
+
+# omarchy:summary=List infrared cameras suitable for face authentication
+# omarchy:hidden=true
+
+# Face authentication drives exactly one kind of IR camera today: an ov7251
+# MIPI sensor behind Intel's IPU3 (ipu3-cio2) media graph, whose illuminator
+# the patched driver exposes as a strobe control. USB (UVC) IR modules and the
+# IPU6/IPU7 sensors are not listed on purpose: the daemon cannot open them, or
+# cannot switch their emitter, so setup would download the models and then
+# fail to verify. Both names are read straight from sysfs, the way faceauth
+# doctor finds the sensor, so this runs as a menu guard without opening a
+# device node (the sensor's node is root-only once the package is installed).
+#
+# Exits 0 with one line per sensor, 1 when there is none.
+
+sysfs="${OMARCHY_V4L_SYSFS_PATH:-/sys/class/video4linux}"
+
+cio2=""
+for node in "$sysfs"/video*; do
+  [[ -r $node/name ]] || continue
+  name=$(<"$node/name")
+  [[ $name == "ipu3-cio2 "* ]] && cio2=$name && break
+done
+[[ -n $cio2 ]] || exit 1
+
+found=1
+for node in "$sysfs"/v4l-subdev*; do
+  [[ -r $node/name ]] || continue
+  name=$(<"$node/name")
+  if [[ $name == "ov7251 "* ]]; then
+    printf '/dev/%s  %s (Intel IPU3)\n' "${node##*/}" "$name"
+    found=0
+  fi
+done
+
+exit $found

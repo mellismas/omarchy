@@ -1,0 +1,74 @@
+#!/bin/bash
+
+# omarchy:summary=Remove face authentication from the lock screen
+# omarchy:args=[--keep-templates]
+# omarchy:requires-sudo=true
+
+set -e
+
+keep_templates=0
+for arg in "$@"; do
+  case $arg in
+    --keep-templates) keep_templates=1 ;;
+    *)
+      # An unknown flag must abort before anything is deleted; a typo once
+      # wiped a user's data in another project because the flag was ignored.
+      echo "Usage: omarchy remove security face [--keep-templates]" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if (( EUID == 0 )); then
+  echo "Run omarchy-remove-security-face as your user, not under sudo (it asks for sudo where needed)." >&2
+  exit 1
+fi
+target_user=$USER
+
+echo -e "\e[32mRemoving face authentication.\n\e[0m"
+
+# PAM first, always, whatever else is chosen: dropping the module while the
+# stack references it would leave the lock screen unable to authenticate.
+if [[ -f /etc/pam.d/omarchy-lock-face ]]; then
+  echo "Removing lock screen face authentication..."
+  sudo rm -f /etc/pam.d/omarchy-lock-face
+fi
+
+# The daemon deletes the templates when it is running, so its cache goes with
+# them; its command exits non-zero on any answer but deleted or not enrolled
+# (busy, a caller it refused as remote, a store error). When it is stopped,
+# or its delete fails, the files go directly: the template, sealed (.cred)
+# or plaintext on a machine without a TPM (.json), and any blob an enrolment
+# set aside as unreadable, all named for the user under the root-only store.
+# Gesture recordings exist only in development builds and are the daemon's
+# to delete. A run that says "removed" must not leave a face on disk, so a
+# failure here is said out loud and the success line is withheld.
+templates_left=0
+if (( keep_templates )); then
+  echo "Keeping the enrolled templates in /var/lib/faceauth (root-only)."
+else
+  echo "Deleting the enrolled templates..."
+  if ! { systemctl is-active --quiet faceauth.service && sudo faceauth templates delete --user "$target_user" >/dev/null; }; then
+    # No store at all means nothing was ever enrolled here; that is not a failure.
+    if sudo test -d /var/lib/faceauth; then
+      sudo find /var/lib/faceauth -maxdepth 1 \( -path "/var/lib/faceauth/$target_user.cred" -o -path "/var/lib/faceauth/$target_user.json" -o -path "/var/lib/faceauth/$target_user.cred.unreadable-*" \) -type f -delete || templates_left=1
+    fi
+  fi
+  if (( templates_left )); then
+    echo -e "\e[31mThe enrolled templates could not be deleted; they are still under /var/lib/faceauth (root-only).\e[0m" >&2
+  fi
+fi
+
+echo "Stopping the face authentication service..."
+sudo systemctl disable --now faceauth.service 2>/dev/null || true
+
+echo "Removing the face authentication packages..."
+omarchy-pkg-drop omarchy-faceauth omarchy-faceauth-models
+
+if (( templates_left )); then
+  echo -e "\e[31mFace authentication has been removed, but the enrolled templates remain. Delete them with:\e[0m" >&2
+  echo "  sudo sh -c 'rm -f /var/lib/faceauth/$target_user.cred /var/lib/faceauth/$target_user.json /var/lib/faceauth/$target_user.cred.unreadable-*'" >&2
+  exit 1
+else
+  echo -e "\e[32mFace authentication has been removed.\e[0m"
+fi

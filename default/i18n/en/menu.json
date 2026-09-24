@@ -647,6 +647,18 @@
   "setup.security.fingerprint": {
     "label": "Fingerprint"
   },
+  "setup.security.face": {
+    "label": "Face"
+  },
+  "setup.security.face.enroll": {
+    "label": "Enroll"
+  },
+  "setup.security.face.add": {
+    "label": "Add Look"
+  },
+  "setup.security.face.status": {
+    "label": "Status"
+  },
   "setup.security.fido2": {
     "label": "Fido2"
   },
@@ -1000,6 +1012,9 @@
   },
   "remove.security.fingerprint": {
     "label": "Fingerprint"
+  },
+  "remove.security.face": {
+    "label": "Face"
   },
   "remove.security.fido2": {
     "label": "Fido2"
