@@ -23,12 +23,12 @@ fi
 label=${label//[^A-Za-z0-9_-]/}
 [[ -n $label ]] || label=extra
 
-echo -e "\e[32m\nEnrolling another look ('$label') in five poses: straight on, left, right, up and down.\e[0m"
+echo -e "\e[32m\nEnrolling another look ('$label'). A window opens: keep the dot on the target as it moves.\e[0m"
 echo "Templates are merged into your existing identity, matched by best score."
 echo
 
 # Enrolment changes who can unlock the machine, so the daemon takes it only from root.
-if sudo faceauth enroll --user "$USER" --label "$label" --guided; then
+if sudo faceauth enroll --user "$USER" --label "$label" --guided --start distance; then
   echo -e "\e[32m\nAdded. Try it: 'faceauth auth' facing the camera in this look.\e[0m"
 else
   echo -e "\e[31m\nEnrolment failed. Please try again.\e[0m"

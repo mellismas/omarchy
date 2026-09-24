@@ -121,7 +121,7 @@ sudo systemctl enable --now faceauth.service
 
 # Enrol before touching PAM, and wire PAM only after a verification succeeds:
 # a stack pointed at a module with nothing to match would be wrong twice.
-echo -e "\e[32m\nLet's enrol your face in five looks: straight on, left, right, up and down, so it matches you as you actually sit, not only square to the camera.\e[0m"
+echo -e "\e[32m\nLet's enrol your face. A window opens and walks you through it: sit as you normally do, then keep the dot on the target as it moves, so the match holds as you actually sit, not only square to the camera.\e[0m"
 echo "Your templates are numbers derived from your face, never images, stored root-only."
 echo -e "On a machine with a TPM they are sealed to it; without one they are plaintext, and 'faceauth doctor' says which.\n"
 
