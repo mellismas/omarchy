@@ -24,13 +24,20 @@ if [[ -n $override && $override == /dev/video* && -c $override ]]; then
 fi
 
 # MIPI sensors on the media controller: any entity whose pad format is Y10.
+# The pad format is read through the sensor's subdev node, and faceauth's udev
+# rule makes that node root-only once the package is installed (a user process
+# must not be able to change the IR sensor's exposure under the daemon), so the
+# format line goes missing for the user running this. A sensor known to be an
+# IR sensor is then recognised by its entity name instead, which the media
+# node still lists.
 if omarchy-cmd-present media-ctl; then
   for media in /dev/media*; do
     [[ -e $media ]] || continue
     media-ctl -d "$media" -p 2>/dev/null | awk -v media="$media" '
-      /^- entity/ { entity = $0; sub(/^- entity [0-9]+: /, "", entity); sub(/ \(.*$/, "", entity) }
-      /device node name/ { node = $NF }
-      /fmt:Y10_1X10/ { if (entity != "" && entity !~ /ipu3-csi2|ipu6/) printf "%s  %s (%s)\n", node, entity, media }
+      function found() { if (entity != "" && node != "" && entity !~ /ipu3-csi2|ipu6/ && !(node in seen)) { seen[node] = 1; printf "%s  %s (%s)\n", node, entity, media } }
+      /^- entity/ { entity = $0; sub(/^- entity [0-9]+: /, "", entity); sub(/ \(.*$/, "", entity); node = "" }
+      /device node name/ { node = $NF; if (entity ~ /^ov7251 /) found() }
+      /fmt:Y10_1X10/ { found() }
     '
   done
 fi
