@@ -83,6 +83,7 @@ printf '\n' >>"$TEST_LOG"
 
 case "${1:-}" in
   enroll) [[ $TEST_ENROLL == ok ]] ;;
+  calibrate) : ;;
   doctor)
     # The rows setup reads, in the daemon's --json shape. TEST_DOCTOR picks
     # which of the two camera rows fails; the real doctor exits 1 on a fail
@@ -233,8 +234,10 @@ add_line=$(grep -n 'omarchy-pkg-add' "$calls" | head -1 | cut -d: -f1)
 (( add_line < doctor_line && doctor_line < enable_line )) || fail "doctor runs after the install and before the service is enabled" "$(cat "$calls")"
 [[ $(cat "$pamd/sudo") == "auth include system-auth" ]] || fail "setup leaves the sudo stack alone" "$(cat "$pamd/sudo")"
 [[ ! -e $pamd/polkit-1 ]] || fail "setup writes no polkit stack"
-# The five looks are prompted in the terminal; nothing opens a window.
-grep -q $'faceauth\tenroll\t--user\t'"$USER"$'\t--terminal' "$calls" || fail "setup enrols the five looks from the terminal" "$(cat "$calls")"
+# The walk-through records the gestures after the looks, in the same run
+# as the enrolment; setup no longer makes a separate calibration call.
+grep -q $'faceauth\tenroll.*--guided' "$calls" || fail "setup enrols through the walk-through, which records the person's gestures" "$(cat "$calls")"
+grep -q $'faceauth\tcalibrate' "$calls" && fail "setup makes no separate calibration call" "$(cat "$calls")"
 pass "setup installs, enrols, verifies, and only then writes the lock-face PAM service"
 
 # Never under sudo: the enrolment would be root's. EUID is read-only in
@@ -313,6 +316,16 @@ TEST_ACTIVE=no run_script "$remove" present ok match --keep-templates || fail "r
 [[ -e $store/$USER.cred ]] || fail "--keep-templates keeps the template with the daemon stopped"
 pass "--keep-templates keeps the template files with the daemon stopped"
 
+# Tune Gestures in the menu runs the setup command with a flag, so the menu
+# file names no sudo: the command's own root guard and requires-sudo header
+# cover it, as omarchy-sudo-passwordless does. The flag runs the one
+# faceauth call and nothing else of setup.
+run_script "$setup" present ok match --gestures || fail "setup --gestures succeeds" "$(cat "$out")"
+[[ $(cat "$calls") == $'sudo\tfaceauth\tcalibrate\t--user\t'"$USER"$'\t--guided\nfaceauth\tcalibrate\t--user\t'"$USER"$'\t--guided' ]] || fail "--gestures runs the guided calibration for the user and nothing else" "$(cat "$calls")"
+run_script "$setup" present ok match --bogus && fail "an unknown flag is refused"
+[[ ! -s $calls ]] || fail "a refused flag runs nothing" "$(cat "$calls")"
+pass "the menu's Tune Gestures row runs through the setup command"
+
 menu="$ROOT/default/omarchy/omarchy-menu.jsonc"
 face_rows=$(grep -E '^\s*"(setup|remove)\.security\.face' "$menu")
 [[ -n $face_rows ]] || fail "the menu carries the face rows"
@@ -321,6 +334,7 @@ face_rows=$(grep -E '^\s*"(setup|remove)\.security\.face' "$menu")
 while read -r label; do
   (( ${#label} <= 16 )) || fail "face menu labels fit the menu with a check mark: $label"
 done < <(grep -o '"label":"[^"]*"' <<<"$face_rows" | sed 's/"label":"//; s/"$//')
+grep -q '"setup.security.face.gestures".*omarchy-setup-security-face --gestures' <<<"$face_rows" || fail "Tune Gestures runs setup --gestures" "$face_rows"
 pass "the face menu rows run through omarchy commands, never sudo"
 
 # The IR camera lister reads sysfs, never a device node: it lists an ov7251

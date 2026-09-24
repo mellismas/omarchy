@@ -247,6 +247,7 @@
   "setup.security.face": {"icon":"󰙃","label":"Face","when":"omarchy-hw-ir-camera"},
   "setup.security.face.enroll": {"icon":"󰙃","label":"Enroll","action":"omarchy-launch-floating-terminal-with-presentation omarchy-setup-security-face"},
   "setup.security.face.add": {"icon":"󰀔","label":"Add Look","when":"omarchy-pkg-present omarchy-faceauth","action":"omarchy-launch-floating-terminal-with-presentation omarchy-setup-security-face-add"},
+  "setup.security.face.gestures": {"icon":"󰖎","label":"Tune Gestures","when":"omarchy-pkg-present omarchy-faceauth","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-setup-security-face --gestures'"},
   "setup.security.face.status": {"icon":"󰋗","label":"Status","when":"omarchy-pkg-present omarchy-faceauth","action":"omarchy-launch-floating-terminal-with-presentation 'faceauth doctor'"},
   "setup.security.fido2": {"icon":"","label":"Fido2","action":"omarchy-launch-floating-terminal-with-presentation omarchy-setup-security-fido2"},
   "setup.security.sshd": {"icon":"󰣀","label":"SSHD","action":"omarchy-launch-floating-terminal-with-presentation omarchy-setup-security-sshd"},

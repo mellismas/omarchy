@@ -656,6 +656,9 @@
   "setup.security.face.add": {
     "label": "Add Look"
   },
+  "setup.security.face.gestures": {
+    "label": "Tune Gestures"
+  },
   "setup.security.face.status": {
     "label": "Status"
   },

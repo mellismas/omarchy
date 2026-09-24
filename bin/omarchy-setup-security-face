@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # omarchy:summary=Set up face authentication for the lock screen
+# omarchy:args=[--gestures]
 # omarchy:requires-sudo=true
 
 set -e
@@ -12,6 +13,12 @@ if (( EUID == 0 )); then
   exit 1
 fi
 target_user=$USER
+
+usage() {
+  echo "Usage: omarchy setup security face [--gestures]" >&2
+  exit 1
+}
+
 
 # The lock screen's face stack is its own PAM service beside the password and
 # fingerprint ones, so it takes no prompt: looking at the machine is the act.
@@ -79,16 +86,19 @@ setup_face() {
 
   # Enrol before touching PAM, and wire PAM only after a verification succeeds:
   # a stack pointed at a module with nothing to match would be wrong twice.
-  echo -e "\e[32m\nLet's enrol your face in five looks: straight on, left, right, up and down, so the match holds as you actually sit, not only square to the camera.\e[0m"
+  echo -e "\e[32m\nLet's enrol your face. A window opens and walks you through it: sit as you normally do, then keep the dot on the target as it moves, so the match holds as you actually sit, not only square to the camera.\e[0m"
   echo "Your templates are numbers derived from your face, never images, stored root-only."
   echo -e "On a machine with a TPM they are sealed to it; without one they are plaintext, and 'faceauth doctor' says which.\n"
 
   # Enrolment changes who can unlock the machine, so the daemon takes it only
-  # from root: sudo here is the password standing behind it. The terminal asks
-  # for each look in turn and offers a look it could not read again.
-  if sudo faceauth enroll --user "$target_user" --terminal; then
+  # from root: sudo here is the password standing behind it.
+  if sudo faceauth enroll --user "$target_user" --guided; then
     echo -e "\nNow let's verify it works.\n"
     if faceauth auth --user "$target_user" | grep -q '^{"result":"match"'; then
+      # The nod and the shake were recorded in the same walk-through, after
+      # the looks, along with the ordinary movements they must stand clear
+      # of. Setup > Security > Face > Tune Gestures runs those rounds again
+      # on their own.
       setup_lock_face_pam
       echo -e "\e[32m\nFace authentication is set up. Lock the screen and look at the camera.\e[0m"
       echo "Run 'faceauth doctor' any time to see the state of every part."
@@ -102,4 +112,15 @@ setup_face() {
   fi
 }
 
-setup_face
+# The menu's Tune Gestures row comes through here instead of running sudo
+# faceauth itself: privileged work goes through an omarchy command, as
+# omarchy-sudo-passwordless does, so the root guard above covers it and the
+# menu file names no sudo. It leaves the rest of setup alone.
+case ${1:-} in
+  "") setup_face ;;
+  --gestures)
+    (( $# == 1 )) || usage
+    sudo faceauth calibrate --user "$target_user" --guided
+    ;;
+  *) usage ;;
+esac
