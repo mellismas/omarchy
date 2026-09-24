@@ -51,6 +51,12 @@ Item {
   readonly property int blankDelayDefaultMs: 5000
   readonly property int blankDelayPresenceMs: 600000
   property int blankDelayMs: 5000
+  // A lock gets one presence-lit window. The daemon asks for it once, when
+  // the owner walks away; every later `lockPresence` on the same lock keeps
+  // the ordinary blank timer, so no process of this uid can hold the panel
+  // lit (and the face scan, camera and illuminator with it) by repeating the
+  // call. Cleared when the lock ends.
+  property bool presenceLitUsed: false
   // After a few failed scans with the panel lit (nobody there), the loop
   // stops scanning and probes instead, exactly as it does while blank.
   property int faceFailures: 0
@@ -147,6 +153,15 @@ Item {
     console.log("omarchy lock " + lastEventAt + " " + event)
   }
 
+  // The face lane logs to the console only. `lastEvent` is read back by the
+  // `lock status` IPC, which answers any process of this uid, and a probe
+  // verdict there ("attentive, waking", "present but not attentive") would
+  // tell such a process whether the owner is at the machine and looking at
+  // it while it is locked. The coarse `authenticating` flag is all it gets.
+  function logFaceEvent(event) {
+    console.log("omarchy lock " + new Date().toISOString() + " " + event)
+  }
+
   function resetAuthenticationState() {
     enteredPassword = ""
     pendingPassword = ""
@@ -171,6 +186,7 @@ Item {
     }
 
     resetAuthenticationState()
+    presenceLitUsed = false
     lockRequested = true
     armBlankTimer()
     logEvent("lock-requested")
@@ -194,6 +210,7 @@ Item {
     resetAuthenticationState()
     idleBlankTimer.stop()
     blankDelayMs = blankDelayDefaultMs
+    presenceLitUsed = false
     sessionLock.locked = false
     logEvent("unlocked")
     runWake()
@@ -315,15 +332,15 @@ Item {
     faceAuthenticating = true
     if (!facePam.start()) {
       faceAuthenticating = false
-      logEvent("face-start-failed")
+      logFaceEvent("face-start-failed")
       return
     }
-    logEvent("face-started")
+    logFaceEvent("face-started")
   }
 
   function handleFaceFinished(result) {
     faceAuthenticating = false
-    logEvent("face-finished: " + (result === PamResult.Success ? "success" : "result=" + result))
+    logFaceEvent("face-finished: " + (result === PamResult.Success ? "success" : "result=" + result))
 
     if (!lockRequested) return
     if (result === PamResult.Success) {
@@ -334,7 +351,7 @@ Item {
       // (camera and illuminator) and let the cheap probe watch for a return.
       if (faceFailures >= 3) {
         faceProbeMode = true
-        logEvent("face-probe-mode: on")
+        logFaceEvent("face-probe-mode: on")
       } else {
         faceRetryTimer.restart()
       }
@@ -495,7 +512,7 @@ Item {
 
     onError: function(error) {
       root.faceAuthenticating = false
-      root.logEvent("face-error: " + error)
+      root.logFaceEvent("face-error: " + error)
       if (root.lockRequested && root.faceConfigured && !root.displaysBlank) faceRetryTimer.restart()
     }
   }
@@ -531,11 +548,11 @@ Item {
       var present = text.indexOf('"face":true') !== -1
       var attentive = text.indexOf('"attentive":true') !== -1
       if (present && (attentive || !root.displaysBlank)) {
-        root.logEvent("face-probe: " + (attentive ? "attentive" : "present") + ", " + (root.displaysBlank ? "waking" : "scanning"))
+        root.logFaceEvent("face-probe: " + (attentive ? "attentive" : "present") + ", " + (root.displaysBlank ? "waking" : "scanning"))
         if (root.displaysBlank) root.runWake()
         else { root.faceProbeMode = false; root.faceFailures = 0; root.startFace() }
       } else if (present) {
-        root.logEvent("face-probe: present but not attentive, staying dark")
+        root.logFaceEvent("face-probe: present but not attentive, staying dark")
       }
     }
   }
@@ -765,12 +782,22 @@ Item {
     }
 
     // A lock taken because the owner walked away: keep the panel lit for ten
-    // minutes so the waiting screen is visible from across the room.
+    // minutes so the waiting screen is visible from across the room. The lit
+    // window is granted once per lock; a repeat on a lock that already had
+    // one only locks (a no-op when locked) and leaves the blank timer alone.
     function lockPresence(): string {
       if (!root.passwordPamConfigured) return "missing-pam"
-      root.blankDelayMs = root.blankDelayPresenceMs
-      if (root.locked) { root.armBlankTimer(); return "ok" }
+      if (root.locked) {
+        if (root.presenceLitUsed) return "ok"
+        root.presenceLitUsed = true
+        root.blankDelayMs = root.blankDelayPresenceMs
+        root.armBlankTimer()
+        return "ok"
+      }
       if (!root.beginLock()) return "failed"
+      root.presenceLitUsed = true
+      root.blankDelayMs = root.blankDelayPresenceMs
+      root.armBlankTimer()
       return "ok"
     }
 
@@ -778,6 +805,9 @@ Item {
       return root.locked ? "true" : "false"
     }
 
+    // Same-uid callers read this. Lock lifecycle only: the face lane never
+    // writes `lastEvent` (see logFaceEvent), so nothing here says whether a
+    // face is in front of the camera.
     function status(): string {
       return JSON.stringify({
         locked: root.locked,
