@@ -125,3 +125,8 @@ o.bind("SUPER + CTRL + ALT + Z", "Reset zoom", function()
 end)
 
 o.bind("SUPER + CTRL + L", "Lock system", "omarchy-system-lock")
+-- One chord, two bindings: a tap (judged on release) cycles the face
+-- walk-away lock mode, a hold toggles two-factor mode. The script tells
+-- them apart, since Hyprland fires the release binding after a hold too.
+o.bind("SUPER + ALT + L", "Cycle face walk-away lock mode", "omarchy-faceauth-lockmode tap", { release = true })
+o.bind("SUPER + ALT + L", "Toggle two-factor mode (hold)", "omarchy-faceauth-lockmode hold", { long_press = true })

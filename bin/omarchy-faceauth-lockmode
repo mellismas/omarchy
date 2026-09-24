@@ -1,0 +1,65 @@
+#!/bin/bash
+
+# omarchy:summary=Cycle the face walk-away lock mode (tap) or toggle two-factor mode (hold)
+# omarchy:args=tap|hold
+# omarchy:hidden=true
+
+# Super+Alt+L carries two bindings: one on release and one on long press.
+# Hyprland fires the release binding after a hold as well, so the hold
+# handler leaves a marker the tap handler checks and clears; a release that
+# finds the marker is the end of a hold, not a tap. The marker lives in the
+# runtime dir, private to the user, and the hold has the same lifetime as
+# the key press, so a stale marker can only come from a hold whose release
+# never arrived and is cleared on the next tap.
+set -euo pipefail
+
+marker=${XDG_RUNTIME_DIR:-/tmp}/omarchy-faceauth-lockmode.hold
+
+# The chord belongs to face authentication and does nothing on a machine
+# without it. "Watching" is the daemon's word for the walk-away lock being
+# on for this user with a face enrolled; anything short of that, including
+# no faceauth at all, and both the tap and the hold are silent no-ops, the
+# same rule that hides the bar widget.
+command -v faceauth >/dev/null 2>&1 || exit 0
+state() { faceauth presence mode 2>/dev/null || true; }
+mode_of() { sed -n 's/.*"mode":"\([a-z]*\)".*/\1/p' <<<"$1"; }
+watching() { [[ $1 == *'"watching":true'* ]]; }
+
+now=$(state)
+if ! watching "$now"; then
+  rm -f "$marker"
+  exit 0
+fi
+
+case ${1:-} in
+  tap)
+    if [[ -e $marker ]]; then
+      rm -f "$marker"
+      exit 0
+    fi
+    case $(mode_of "$now") in
+      secure) next=default ;;
+      *) next=secure ;;
+    esac
+    if faceauth presence mode "$next" >/dev/null 2>&1; then
+      omarchy-shell -q omarchy.faceauth.presence refresh || true
+      case $next in
+        secure) omarchy-notification-send -u low "Walk-away lock: secure" "Locks when you are not in frame." ;;
+        *) omarchy-notification-send -u low "Walk-away lock: default" "Locks when nobody is there." ;;
+      esac
+    else
+      omarchy-notification-send -u low "Walk-away lock" "The mode could not be changed; is faceauth running?"
+    fi
+    ;;
+  hold)
+    touch "$marker"
+    # Two-factor mode is designed (design/plan-two-factor-20260923.html in
+    # the FaceAuth pack) and not yet built. When it lands, this turns it on
+    # with no prompt, or asks for any two factors before turning it off.
+    omarchy-notification-send -u low "Two-factor mode" "Not set up yet."
+    ;;
+  *)
+    echo "usage: omarchy-faceauth-lockmode tap|hold" >&2
+    exit 2
+    ;;
+esac
