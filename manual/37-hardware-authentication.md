@@ -28,6 +28,6 @@ Once it's set up, `sudo` and system authorization prompts open a small window na
 
 Nothing marks the window as the real one: a program already running under your account could draw a look-alike and collect a password typed into it. Type your password into it only for a request you just made, and prefer the nod, which a fake window can't use.
 
-Your enrollment is a set of numbers derived from your face, never images, kept root-only and sealed to the TPM when the machine has one. _Setup > Security > Face_ also holds _Add Look_, _Tune Gestures_ and _Status_ (`faceauth doctor`).
+Your enrollment is a set of numbers derived from your face, never images, kept root-only and sealed to the TPM when the machine has one. _Setup > Security > Face_ also holds _Add Look_, _Tune Gestures_, _Walk-Away Lock_ and _Status_ (`faceauth doctor`). The walk-away lock locks the screen once nobody has been in front of it for the away time; in its secure mode only your own face keeps it open and the first look that finds someone else locks within about five seconds. Switch modes from the bar widget or with `Super + Ctrl + Shift + L`; the switch lasts until the face service restarts.
 
 You can remove face authentication under _Remove > Security > Face_ in the Omarchy menu.

@@ -41,6 +41,7 @@ User-installed plugins live alongside these conceptually but on disk under
 | Dock          | `omarchy.dock`            | `service`               | `dock/Dock.qml`                       |
 | Face consent  | `omarchy.faceauth`        | `overlay`               | `faceauth/Consent.qml`                |
 | Face enrolment | `omarchy.faceauth.enrol` | `overlay`               | `faceauth-enrol/Enrol.qml`            |
+| Face presence | `omarchy.faceauth.presence` | `bar-widget`          | `faceauth-presence/BarWidget.qml`     |
 
 First-party bar-only widgets also carry manifests next to their QML files,
 e.g. `bar/widgets/Workspaces.manifest.json`. Rich popup widgets live in their

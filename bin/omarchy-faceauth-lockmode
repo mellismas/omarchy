@@ -1,0 +1,33 @@
+#!/bin/bash
+
+# omarchy:summary=Switch the face walk-away lock between default and secure mode
+# omarchy:hidden=true
+
+# Super+Ctrl+Shift+L: switch the walk-away lock to the other mode through faceauth,
+# refresh the bar widget, and say which mode it is now. The chord belongs to
+# face authentication and does nothing on a machine without it. "Watching"
+# is the daemon's word for the walk-away lock being on for this user with a
+# face enrolled; anything short of that, and the chord is a silent no-op,
+# the same rule that hides the bar widget.
+set -euo pipefail
+
+if omarchy-cmd-present faceauth; then
+  now=$(faceauth presence mode 2>/dev/null) || now=""
+  if [[ $now == *'"watching":true'* ]]; then
+    if [[ $now == *'"mode":"secure"'* ]]; then
+      next=default
+    else
+      next=secure
+    fi
+    if faceauth presence mode "$next" >/dev/null 2>&1; then
+      omarchy-shell -q omarchy.faceauth.presence refresh
+      if [[ $next == "secure" ]]; then
+        omarchy-notification-send -u low "$(omarchy-i18n faceauth.lockSecureTitle)" "$(omarchy-i18n faceauth.lockSecureBody)"
+      else
+        omarchy-notification-send -u low "$(omarchy-i18n faceauth.lockDefaultTitle)" "$(omarchy-i18n faceauth.lockDefaultBody)"
+      fi
+    else
+      omarchy-notification-send -u low "$(omarchy-i18n faceauth.lockTitle)" "$(omarchy-i18n faceauth.lockModeFailed)"
+    fi
+  fi
+fi

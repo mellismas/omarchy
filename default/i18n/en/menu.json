@@ -659,6 +659,21 @@
   "setup.security.face.gestures": {
     "label": "Tune Gestures"
   },
+  "setup.security.face.lock": {
+    "label": "Walk-Away Lock"
+  },
+  "setup.security.face.lock.off": {
+    "label": "Off"
+  },
+  "setup.security.face.lock.20": {
+    "label": "After 20 seconds"
+  },
+  "setup.security.face.lock.30": {
+    "label": "After 30 seconds"
+  },
+  "setup.security.face.lock.60": {
+    "label": "After 60 seconds"
+  },
   "setup.security.face.status": {
     "label": "Status"
   },

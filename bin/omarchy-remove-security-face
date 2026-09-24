@@ -88,6 +88,10 @@ else
   fi
 fi
 
+# The bar widget went on with setup, so it comes off here; a shell that does
+# not know it (already off, or not running) is not a failure.
+omarchy-plugin-disable omarchy.faceauth.presence >/dev/null 2>&1 || true
+
 echo "Stopping the face authentication service..."
 sudo systemctl disable --now faceauth.service 2>/dev/null || true
 

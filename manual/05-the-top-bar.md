@@ -30,6 +30,7 @@ Nearly every widget does something on left, right, and middle click, and several
 | Agents | Agents panel | Launch your agent | Middle: next subscription |
 | Tray | Hover to reveal the drawer | Right on the chevron to manage | — |
 | Omarchy update | Run the update | — | — |
+| Walk-away lock | Switch between default and secure | Choose a mode | — |
 
 Not everything in that table is on your bar out of the box. The media widget (MPRIS now-playing, with a scrolling track and artist) and the microphone widget are both built in but off by default — add them if you want them, as described below.
 
@@ -71,6 +72,8 @@ The **Tailscale** panel connects and disconnects the tailnet, switches between a
 The **Dropbox** panel handles login, shows how much storage you've used, and lists recently synced files.
 
 Removing either service takes its widget back off the bar.
+
+The **walk-away lock** widget joins the bar when you set up [face authentication](37-hardware-authentication.md) and shows while the presence watch is on: a left click switches between the default and secure modes, a right click lists them, and `Super + Ctrl + Shift + L` does the same from the keyboard. Removing face authentication takes it off again.
 
 ## Indicators
 

@@ -136,7 +136,7 @@ case "${1:-}" in
 esac
 SH
 
-for cmd in omarchy-pkg-add omarchy-pkg-drop systemctl; do
+for cmd in omarchy-pkg-add omarchy-pkg-drop systemctl omarchy-bar omarchy-plugin-disable; do
   cat >"$stub_bin/$cmd" <<SH
 #!/bin/bash
 
@@ -245,6 +245,7 @@ pass "setup writes no PAM service when the verification scan does not match"
 # their package, so nothing is fetched.
 rm -f "$pamd/omarchy-lock-face"
 run_script "$setup" present ok match || fail "setup succeeds with a camera, an enrolment and a match" "$(cat "$calls")"
+grep -q $'omarchy-bar\tput\tomarchy.faceauth.presence\t--before\tomarchy.power' "$calls" || fail "setup puts the walk-away widget on the bar after the match" "$(cat "$calls")"
 [[ -f $pamd/omarchy-lock-face ]] || fail "setup writes the lock-face PAM service"
 grep -q 'pam_faceauth.so' "$pamd/omarchy-lock-face" || fail "the lock-face service names the face module"
 grep -q 'pam_deny.so' "$pamd/omarchy-lock-face" || fail "the lock-face service is closed by pam_deny"
@@ -281,6 +282,7 @@ pass "setup and removal carry the root guard"
 # Removal takes the PAM service out before the package. The sudo stack is
 # left as the good path wrote it, so the strip has a line to take out.
 keep_pam=1 run_script "$remove" present ok match || fail "removal succeeds" "$(cat "$calls")"
+grep -q $'omarchy-plugin-disable\tomarchy.faceauth.presence' "$calls" || fail "removal takes the walk-away widget off the bar" "$(cat "$calls")"
 [[ ! -e $pamd/omarchy-lock-face ]] || fail "removal deletes the lock-face PAM service"
 rm_line=$(grep -n $'sudo\trm' "$calls" | head -1 | cut -d: -f1)
 drop_line=$(grep -n 'omarchy-pkg-drop' "$calls" | head -1 | cut -d: -f1)
@@ -422,15 +424,21 @@ TEST_ACTIVE=no run_script "$remove" present ok match --keep-templates || fail "r
 [[ -e $store/$USER.cred ]] || fail "--keep-templates keeps the template with the daemon stopped"
 pass "--keep-templates keeps the template files with the daemon stopped"
 
-# Tune Gestures in the menu runs the setup command with a flag, so the menu
-# file names no sudo: the command's own root guard and requires-sudo header
-# cover it, as omarchy-sudo-passwordless does. The flag runs the one
-# faceauth call and nothing else of setup.
+# Tune Gestures and the Walk-Away rows in the menu run the setup command
+# with a flag, so the menu file names no sudo: the command's own root guard
+# and requires-sudo header cover them, as omarchy-sudo-passwordless does.
+# The flags run the one faceauth call and nothing else of setup.
 run_script "$setup" present ok match --gestures || fail "setup --gestures succeeds" "$(cat "$out")"
 [[ $(cat "$calls") == $'sudo\tfaceauth\tcalibrate\t--user\t'"$USER"$'\t--guided\nfaceauth\tcalibrate\t--user\t'"$USER"$'\t--guided' ]] || fail "--gestures runs the guided calibration for the user and nothing else" "$(cat "$calls")"
-run_script "$setup" present ok match --bogus && fail "an unknown flag is refused"
+run_script "$setup" present ok match --walk-away 30 || fail "setup --walk-away 30 succeeds" "$(cat "$out")"
+grep -q $'^sudo\tfaceauth\tpresence\ton\t--user\t'"$USER"$'\t--away-seconds\t30$' "$calls" || fail "--walk-away 30 turns the watch on at 30 seconds" "$(cat "$calls")"
+! grep -q 'omarchy-pkg-add\|tee' "$calls" || fail "--walk-away runs nothing else of setup" "$(cat "$calls")"
+run_script "$setup" present ok match --walk-away off || fail "setup --walk-away off succeeds" "$(cat "$out")"
+grep -q $'^sudo\tfaceauth\tpresence\toff\t--user\t'"$USER"'$' "$calls" || fail "--walk-away off turns the watch off" "$(cat "$calls")"
+run_script "$setup" present ok match --walk-away 45 && fail "an away time the menu does not offer is refused"
 [[ ! -s $calls ]] || fail "a refused flag runs nothing" "$(cat "$calls")"
-pass "the menu's Tune Gestures row runs through the setup command"
+run_script "$setup" present ok match --bogus && fail "an unknown flag is refused"
+pass "the menu's gesture and walk-away rows run through the setup command"
 
 menu="$ROOT/default/omarchy/omarchy-menu.jsonc"
 face_rows=$(grep -E '^\s*"(setup|remove)\.security\.face' "$menu")
@@ -441,7 +449,24 @@ while read -r label; do
   (( ${#label} <= 16 )) || fail "face menu labels fit the menu with a check mark: $label"
 done < <(grep -o '"label":"[^"]*"' <<<"$face_rows" | sed 's/"label":"//; s/"$//')
 grep -q '"setup.security.face.gestures".*omarchy-setup-security-face --gestures' <<<"$face_rows" || fail "Tune Gestures runs setup --gestures" "$face_rows"
-pass "the face menu rows run through omarchy commands, never sudo"
+for v in off 20 30 60; do
+  grep -q "\"setup.security.face.lock.$v\".*omarchy-setup-security-face --walk-away $v" <<<"$face_rows" || fail "the Walk-Away $v row runs setup --walk-away $v" "$face_rows"
+  grep -q "\"setup.security.face.lock.$v\".*\"checked\"" <<<"$face_rows" || fail "the Walk-Away $v row marks itself when it is the current choice" "$face_rows"
+done
+# The checked guards read the daemon's config, which presence on|off rewrites
+# with enabled and a float away time; each guard runs as a bash condition.
+conf="$test_tmp/config.toml"
+guard_of() { grep "\"setup.security.face.lock.$1\"" "$menu" | sed 's/.*"checked":"\(.*\)","action".*/\1/' | sed 's/\\"/"/g; s/\\\\/\\/g' | sed "s|/etc/faceauth/config.toml|$conf|g"; }
+printf '[presence]\nenabled = true\nuser = "%s"\naway_seconds = 30.0\n' "$USER" >"$conf"
+bash -c "$(guard_of 30)" || fail "the 30 row is checked when the watch is on at 30 seconds" "$(guard_of 30)"
+bash -c "$(guard_of 20)" && fail "the 20 row is not checked at 30 seconds"
+bash -c "$(guard_of off)" && fail "the Off row is not checked while the watch is on"
+printf '[presence]\nenabled = false\nuser = "%s"\naway_seconds = 30.0\n' "$USER" >"$conf"
+bash -c "$(guard_of off)" || fail "the Off row is checked while the watch is off" "$(guard_of off)"
+bash -c "$(guard_of 30)" && fail "no time row is checked while the watch is off"
+rm -f "$conf"
+bash -c "$(guard_of off)" || fail "with no config at all the Off row is checked" "$(guard_of off)"
+pass "the Walk-Away rows show the current choice from the daemon's config"
 
 # The IR camera lister reads sysfs, never a device node: it lists an ov7251
 # sensor only beside an ipu3-cio2 capture node, because that graph is the
