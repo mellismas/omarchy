@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# omarchy:summary=Set up face authentication for the lock screen
+# omarchy:summary=Set up face authentication for the lock screen, sudo, and polkit
 # omarchy:args=[--gestures]
 # omarchy:requires-sudo=true
 
@@ -19,6 +19,87 @@ usage() {
   exit 1
 }
 
+
+# The polkit override setup creates is remembered by a copy of exactly what
+# it wrote, kept outside /etc/pam.d because a stray file inside the PAM
+# directory is a service of its own. Removal deletes the override only while
+# it still matches the copy. The directory is root-only, so the marker is
+# looked up through sudo.
+marker_dir=/var/backups/faceauth
+created_marker=$marker_dir/polkit-1.created-by-faceauth
+# sudo: everything the module returns but a match is ignore, and the stack
+# falls to the terminal password as usual (a shake at the window means "not
+# by face"). polkit: a refusal at the window is PAM_AUTH_ERR and ends the
+# stack, and the agent cancels the request on it; otherwise polkit would
+# start the helper again and ask forever.
+face_line='auth      sufficient pam_faceauth.so socket=/run/faceauth/sock consent'
+polkit_face_line='auth      [success=done auth_err=die default=ignore] pam_faceauth.so socket=/run/faceauth/sock consent'
+
+# Elevation is a deliberate act: the line carries `consent`, so the daemon
+# opens a window naming the request and approves it only on two nods (or the
+# password typed there). Sitting in front of the machine never elevates
+# anything by itself. Every failure inside the module is PAM_IGNORE, so the
+# password path stays the floor. What the user's own no does depends on the
+# stack: on sudo, `sufficient` turns it into ignore too and the terminal
+# prompt follows; on polkit, auth_err=die ends the stack so the agent can
+# cancel the request.
+#
+# The line goes above the password but after any fingerprint or FIDO2 line,
+# whichever was set up first: a touch or a tap then still answers first,
+# and the face window, which has no deadline, does not sit above a reader
+# the user meant to use. Fingerprint and FIDO2 setup insert at line 1, so
+# they keep that place when they come later.
+#
+# A face line that is not exactly ours (a hand-edited stack, or one missing
+# `consent`) would approve on a plain look with no window at all, so it is
+# replaced rather than kept.
+write_face_line() {
+  local file="$1" line="$2" after
+  if grep -qxF "$line" "$file"; then
+    echo "${file##*/} is already configured for face authentication."
+    return 0
+  fi
+  if grep -qE '^[^#]*pam_faceauth\.so' "$file"; then
+    echo "Replacing a face line in ${file##*/} that setup did not write..."
+    sudo sed -i '/pam_faceauth\.so/d' "$file"
+  else
+    echo "Configuring ${file##*/} for face authentication..."
+  fi
+  after=$(grep -nE '^[^#]*(pam_fprintd|pam_u2f)\.so' "$file" | tail -1 | cut -d: -f1)
+  if [[ -n $after ]]; then
+    sudo sed -i "${after}a $line" "$file"
+  else
+    sudo sed -i "1i $line" "$file"
+  fi
+}
+
+setup_pam_config() {
+  write_face_line /etc/pam.d/sudo "$face_line"
+
+  if [[ -f /etc/pam.d/polkit-1 ]]; then
+    write_face_line /etc/pam.d/polkit-1 "$polkit_face_line"
+  else
+    # No file in /etc/pam.d means polkit runs the vendor stack; an override
+    # there must carry the whole stack, not just our line. The marker keeps a
+    # copy of exactly what was written: removal deletes the file, returning
+    # polkit to the vendor stack, only while it still matches that copy. A
+    # fingerprint or FIDO2 line added later makes the file someone else's too,
+    # and then removal strips our line and leaves the rest in place.
+    echo "Creating polkit configuration with face authentication..."
+    sudo install -dm700 "$marker_dir"
+    # omarchy:heredoc-expands paths=polkit_face_line -- $polkit_face_line is the constant PAM
+    # line set at the top of this script, never user input; nothing else expands.
+    sudo tee /etc/pam.d/polkit-1 >/dev/null <<EOF
+#%PAM-1.0
+$polkit_face_line
+auth       include      system-auth
+account    include      system-auth
+password   include      system-auth
+session    include      system-auth
+EOF
+    sudo cp -p /etc/pam.d/polkit-1 "$created_marker"
+  fi
+}
 
 # The lock screen's face stack is its own PAM service beside the password and
 # fingerprint ones, so it takes no prompt: looking at the machine is the act.
@@ -91,7 +172,7 @@ setup_face() {
   echo -e "On a machine with a TPM they are sealed to it; without one they are plaintext, and 'faceauth doctor' says which.\n"
 
   # Enrolment changes who can unlock the machine, so the daemon takes it only
-  # from root: sudo here is the password standing behind it.
+  # from root: sudo here is the password (or an existing face) standing behind it.
   if sudo faceauth enroll --user "$target_user" --guided; then
     echo -e "\nNow let's verify it works.\n"
     if faceauth auth --user "$target_user" | grep -q '^{"result":"match"'; then
@@ -99,8 +180,10 @@ setup_face() {
       # the looks, along with the ordinary movements they must stand clear
       # of. Setup > Security > Face > Tune Gestures runs those rounds again
       # on their own.
+      setup_pam_config
       setup_lock_face_pam
-      echo -e "\e[32m\nFace authentication is set up. Lock the screen and look at the camera.\e[0m"
+      echo -e "\e[32m\nFace authentication is set up.\e[0m"
+      echo "Lock screen: look at the camera. sudo and polkit: nod twice at the window, shake to refuse, or type your password there."
       echo "Run 'faceauth doctor' any time to see the state of every part."
     else
       echo -e "\e[31m\nVerification failed. Enrolment is kept; try 'faceauth auth' facing the camera, then run this again.\e[0m"

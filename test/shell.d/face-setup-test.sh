@@ -18,9 +18,10 @@ test_tmp=$(mktemp -d)
 stub_bin="$test_tmp/bin"
 calls="$test_tmp/calls.log"
 pamd="$test_tmp/pam.d"
+backups="$test_tmp/backups"
 store="$test_tmp/store"
 out="$test_tmp/out.log"
-mkdir -p "$stub_bin" "$pamd" "$store"
+mkdir -p "$stub_bin" "$pamd" "$backups" "$store"
 
 cleanup() {
   rm -rf "$test_tmp"
@@ -40,9 +41,10 @@ printf 'sudo' >>"$TEST_LOG"
 printf '\t%s' "$@" >>"$TEST_LOG"
 printf '\n' >>"$TEST_LOG"
 
-# Every path under /etc/pam.d or /var/lib/faceauth is redirected into the
-# scratch tree, so the real scripts run unchanged and never touch the host.
-map() { local p=$1; p=${p/#\/etc\/pam.d/$TEST_PAMD}; p=${p/#\/var\/lib\/faceauth/$TEST_STORE}; printf '%s' "$p"; }
+# Every path under /etc/pam.d, /var/backups/faceauth or /var/lib/faceauth is
+# redirected into the scratch tree, so the real scripts run unchanged and
+# never touch the host.
+map() { local p=$1; p=${p/#\/etc\/pam.d/$TEST_PAMD}; p=${p/#\/var\/backups\/faceauth/$TEST_BACKUPS}; p=${p/#\/var\/lib\/faceauth/$TEST_STORE}; printf '%s' "$p"; }
 
 case "${1:-}" in
   tee)
@@ -51,6 +53,12 @@ case "${1:-}" in
   rm)
     shift; args=(); for a in "$@"; do [[ $a == -* ]] && args+=("$a") || args+=("$(map "$a")"); done
     /usr/bin/rm "${args[@]}"
+    ;;
+  sed)
+    # Setup inserts at line 1 or after a fingerprint or FIDO2 line; removal
+    # and a replaced hand-edited line delete by pattern. Nothing else.
+    [[ $2 == -i && ( $3 =~ ^([0-9]+[ai]) || $3 == '/pam_faceauth\.so/d' ) ]] || { echo "unexpected sed: $*" >&2; exit 97; }
+    /usr/bin/sed -i "$3" "$(map "$4")"
     ;;
   test)
     [[ $2 == -f || $2 == -d ]] || { echo "unexpected test: $*" >&2; exit 97; }
@@ -63,6 +71,23 @@ case "${1:-}" in
     (( ${TEST_FIND_FAIL:-0} == 0 )) || exit 1
     shift; args=(); for a in "$@"; do args+=("$(map "$a")"); done
     /usr/bin/find "${args[@]}"
+    ;;
+  cmp)
+    [[ $2 == -s && $3 == - ]] || { echo "unexpected cmp: $*" >&2; exit 97; }
+    /usr/bin/cmp -s - "$(map "$4")"
+    ;;
+  install)
+    [[ $2 == -dm700 ]] || { echo "unexpected install: $*" >&2; exit 97; }
+    /usr/bin/install -dm700 "$(map "$3")"
+    ;;
+  rmdir)
+    /usr/bin/rmdir "$(map "$2")"
+    ;;
+  cp)
+    /usr/bin/cp -p "$(map "$3")" "$(map "$4")"
+    ;;
+  touch)
+    /usr/bin/touch "$(map "$2")"
     ;;
   faceauth|systemctl)
     exec "$@"
@@ -154,11 +179,11 @@ occurrences=$(grep -c '/etc/pam.d/omarchy-lock-face' "$setup") || occurrences=0
 occurrences=$(grep -c '/etc/pam.d/omarchy-lock-face' "$remove") || occurrences=0
 (( occurrences == 2 )) || fail "removal names the lock-face PAM service exactly twice (the check and the rm)" "found $occurrences occurrences"
 retarget() {
-  sed -e "s|/etc/pam.d|$pamd|g" -e "s|/var/lib/faceauth|$store|g" "$1"
+  sed -e "s|/etc/pam.d|$pamd|g" -e "s|/var/backups/faceauth|$backups|g" -e "s|/var/lib/faceauth|$store|g" "$1"
 }
 setup_copy="$test_tmp/setup.sh"; retarget "$setup" >"$setup_copy"
 remove_copy="$test_tmp/remove.sh"; retarget "$remove" >"$remove_copy"
-! grep -qE '/etc/pam\.d|/var/lib/faceauth' "$setup_copy" "$remove_copy" || fail "the retargeted copies name no real path"
+! grep -qE '/etc/pam\.d|/var/backups/faceauth|/var/lib/faceauth' "$setup_copy" "$remove_copy" || fail "the retargeted copies name no real path"
 pass "the scripts name the PAM service as expected, and the test drives retargeted copies"
 
 run_script() {
@@ -167,9 +192,9 @@ run_script() {
   [[ $script == "$setup" ]] && script=$setup_copy
   [[ $script == "$remove" ]] && script=$remove_copy
   : >"$calls"
-  # A stock sudo stack, so a test can see that setup leaves it alone.
-  printf 'auth include system-auth\n' >"$pamd/sudo"
-  TEST_LOG="$calls" TEST_PAMD="$pamd" TEST_STORE="$store" TEST_CAMERA="$camera" TEST_ENROLL="$enroll" TEST_AUTH="$auth" \
+  # keep_pam=1 leaves the sudo stack as the previous run left it.
+  (( ${keep_pam:-0} )) || printf 'auth include system-auth\n' >"$pamd/sudo"
+  TEST_LOG="$calls" TEST_PAMD="$pamd" TEST_BACKUPS="$backups" TEST_STORE="$store" TEST_CAMERA="$camera" TEST_ENROLL="$enroll" TEST_AUTH="$auth" \
     TEST_DOCTOR="${doctor:-pass}" PATH="$stub_bin:$PATH" bash "$script" "$@" </dev/null >"$out" 2>&1
 }
 
@@ -232,8 +257,15 @@ doctor_line=$(grep -n $'faceauth\tdoctor' "$calls" | head -1 | cut -d: -f1)
 enable_line=$(grep -n $'systemctl\tenable' "$calls" | head -1 | cut -d: -f1)
 add_line=$(grep -n 'omarchy-pkg-add' "$calls" | head -1 | cut -d: -f1)
 (( add_line < doctor_line && doctor_line < enable_line )) || fail "doctor runs after the install and before the service is enabled" "$(cat "$calls")"
-[[ $(cat "$pamd/sudo") == "auth include system-auth" ]] || fail "setup leaves the sudo stack alone" "$(cat "$pamd/sudo")"
-[[ ! -e $pamd/polkit-1 ]] || fail "setup writes no polkit stack"
+grep -q 'pam_faceauth.so socket=/run/faceauth/sock consent' "$pamd/sudo" || fail "setup puts a consent line on the sudo stack" "$(cat "$pamd/sudo")"
+grep -q '^auth      sufficient pam_faceauth.so' "$pamd/sudo" || fail "the sudo consent line is sufficient: a shake falls to the terminal prompt" "$(cat "$pamd/sudo")"
+[[ $(head -1 "$pamd/sudo") == *pam_faceauth.so* ]] || fail "the consent line is the first line of the sudo stack"
+(( $(grep -c . "$pamd/sudo") == 2 )) || fail "setup adds one line to the sudo stack and nothing else" "$(cat "$pamd/sudo")"
+! grep -q 'pre-face' "$calls" || fail "setup keeps no backup of the stacks it changes" "$(cat "$calls")"
+[[ -z $(ls -A "$backups" | grep -v polkit-1.created-by-faceauth) ]] || fail "the marker is the only file setup keeps outside /etc/pam.d" "$(ls -A "$backups")"
+[[ -f $pamd/polkit-1 && -f $backups/polkit-1.created-by-faceauth ]] || fail "setup creates polkit-1 when absent and remembers that it did"
+grep -q 'pam_faceauth.so' "$pamd/polkit-1" || fail "the created polkit-1 carries the consent line"
+grep -q '^auth      \[success=done auth_err=die default=ignore\] pam_faceauth.so' "$pamd/polkit-1" || fail "the polkit consent line ends the stack on the user's no so the agent can cancel" "$(cat "$pamd/polkit-1")"
 # The walk-through records the gestures after the looks, in the same run
 # as the enrolment; setup no longer makes a separate calibration call.
 grep -q $'faceauth\tenroll.*--guided' "$calls" || fail "setup enrols through the walk-through, which records the person's gestures" "$(cat "$calls")"
@@ -246,14 +278,22 @@ grep -q '(( EUID == 0 ))' "$setup" || fail "setup refuses to run as root"
 grep -q '(( EUID == 0 ))' "$remove" || fail "removal refuses to run as root"
 pass "setup and removal carry the root guard"
 
-# Removal takes the PAM service out before the package.
-run_script "$remove" present ok match || fail "removal succeeds" "$(cat "$calls")"
+# Removal takes the PAM service out before the package. The sudo stack is
+# left as the good path wrote it, so the strip has a line to take out.
+keep_pam=1 run_script "$remove" present ok match || fail "removal succeeds" "$(cat "$calls")"
 [[ ! -e $pamd/omarchy-lock-face ]] || fail "removal deletes the lock-face PAM service"
 rm_line=$(grep -n $'sudo\trm' "$calls" | head -1 | cut -d: -f1)
 drop_line=$(grep -n 'omarchy-pkg-drop' "$calls" | head -1 | cut -d: -f1)
 (( rm_line < drop_line )) || fail "the PAM service goes before the package" "$(cat "$calls")"
 grep -q $'omarchy-pkg-drop\tomarchy-faceauth\tomarchy-faceauth-models' "$calls" || fail "removal drops the models package with the main one" "$(cat "$calls")"
 grep -q $'faceauth\ttemplates\tdelete' "$calls" || fail "removal deletes the templates by default" "$(cat "$calls")"
+! grep -q pam_faceauth "$pamd/sudo" || fail "removal takes the consent line off the sudo stack" "$(cat "$pamd/sudo")"
+[[ $(cat "$pamd/sudo") == "auth include system-auth" ]] || fail "removal leaves the sudo stack as it was before setup" "$(cat "$pamd/sudo")"
+grep -qF $'sudo\tsed\t-i\t/pam_faceauth\\.so/d' "$calls" || fail "removal strips the line in place, as fingerprint and FIDO2 do" "$(cat "$calls")"
+! grep -q $'sudo\tcp\|pre-face' "$calls" || fail "removal restores nothing from a backup" "$(cat "$calls")"
+[[ ! -e $pamd/polkit-1 ]] || fail "removal deletes the polkit-1 file that setup created"
+[[ ! -e $backups/polkit-1.created-by-faceauth ]] || fail "removal deletes the marker with the file it stood for"
+[[ ! -d $backups ]] || fail "removal takes the marker directory away with the marker" "$(ls -A "$backups")"
 pass "removal takes the PAM service out first, deletes the templates, then drops the package"
 
 : >"$calls"
@@ -263,6 +303,72 @@ pass "removal keeps the templates when asked"
 
 run_script "$remove" present ok match --bogus && fail "removal rejects an unknown flag before deleting anything"
 pass "removal rejects an unknown flag"
+
+# A FIDO2 line added after face was set up must survive removal: only our
+# line goes.
+rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
+run_script "$setup" present ok match || fail "setup succeeds before the later change" "$(cat "$calls")"
+/usr/bin/sed -i '2i auth sufficient pam_u2f.so cue' "$pamd/sudo"
+keep_pam=1 run_script "$remove" present ok match || fail "removal succeeds after a later change" "$(cat "$calls")"
+grep -q pam_u2f.so "$pamd/sudo" || fail "removal keeps a pam_u2f line added after setup" "$(cat "$pamd/sudo")"
+! grep -q pam_faceauth "$pamd/sudo" || fail "removal still takes our line off a changed stack" "$(cat "$pamd/sudo")"
+(( $(grep -c . "$pamd/sudo") == 2 )) || fail "removal leaves the changed stack otherwise as it was" "$(cat "$pamd/sudo")"
+pass "removal strips only our line when the stack changed after setup"
+
+# Fingerprint or FIDO2 set up first: the face line goes after their line, so
+# a touch or a tap still answers first and the face window, which has no
+# deadline, never sits above a reader the user meant to use. The clamshell
+# gate fingerprint puts before its own line stays exactly there.
+rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
+printf 'auth      [success=1 default=ignore] pam_exec.so quiet /usr/bin/omarchy-hw-laptop-closed\nauth      sufficient pam_fprintd.so\nauth include system-auth\n' >"$pamd/sudo"
+keep_pam=1 run_script "$setup" present ok match || fail "setup succeeds on a stack with a fingerprint line" "$(cat "$calls")"
+[[ $(sed -n 1p "$pamd/sudo") == *omarchy-hw-laptop-closed* && $(sed -n 2p "$pamd/sudo") == *pam_fprintd.so* ]] || fail "the fingerprint gate and line keep their places" "$(cat "$pamd/sudo")"
+[[ $(sed -n 3p "$pamd/sudo") == "$(grep -m1 '^face_line=' "$setup" | sed "s/^face_line='//; s/'\$//")" ]] || fail "the face line goes right after the fingerprint line" "$(cat "$pamd/sudo")"
+[[ $(sed -n 4p "$pamd/sudo") == "auth include system-auth" ]] && (( $(grep -c . "$pamd/sudo") == 4 )) || fail "nothing else moves" "$(cat "$pamd/sudo")"
+printf 'auth sufficient pam_u2f.so cue\nauth include system-auth\n' >"$pamd/sudo"
+keep_pam=1 run_script "$setup" present ok match || fail "setup succeeds on a stack with a FIDO2 line" "$(cat "$calls")"
+[[ $(sed -n 1p "$pamd/sudo") == *pam_u2f.so* && $(sed -n 2p "$pamd/sudo") == *pam_faceauth.so* ]] || fail "the face line goes after a FIDO2 line" "$(cat "$pamd/sudo")"
+pass "setup puts the face line after a fingerprint or FIDO2 line, never above it"
+
+# A face line setup did not write, one without consent for instance, would
+# approve sudo on a plain look with no window; setup replaces it with its own
+# instead of reporting the stack as already configured.
+printf 'auth sufficient pam_faceauth.so socket=/run/faceauth/sock\nauth include system-auth\n' >"$pamd/sudo"
+keep_pam=1 run_script "$setup" present ok match || fail "setup succeeds on a stack with a hand-added face line" "$(cat "$calls")"
+(( $(grep -c pam_faceauth.so "$pamd/sudo") == 1 )) || fail "one face line remains" "$(cat "$pamd/sudo")"
+grep -q 'pam_faceauth.so socket=/run/faceauth/sock consent' "$pamd/sudo" || fail "the remaining line is the consent one" "$(cat "$pamd/sudo")"
+grep -q 'Replacing a face line in sudo' "$out" || fail "setup says it replaced the line" "$(cat "$out")"
+keep_pam=1 run_script "$setup" present ok match || fail "setup succeeds again on its own line" "$(cat "$calls")"
+grep -q 'sudo is already configured' "$out" || fail "an exact match reads as already configured" "$(cat "$out")"
+(( $(grep -c pam_faceauth.so "$pamd/sudo") == 1 )) || fail "a re-run adds no second line" "$(cat "$pamd/sudo")"
+pass "setup replaces a face line it did not write and recognises only its own"
+
+# A polkit-1 that setup created is deleted only while it is still exactly what
+# setup wrote. omarchy-setup-security-fingerprint inserts pam_fprintd.so into
+# the same file; deleting the file would take the fingerprint with it, so
+# removal must strip only our line and keep the rest.
+rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
+run_script "$setup" present ok match || fail "setup succeeds before a later fingerprint setup" "$(cat "$calls")"
+[[ -f $backups/polkit-1.created-by-faceauth ]] || fail "setup remembers that it created polkit-1"
+/usr/bin/cmp -s "$pamd/polkit-1" "$backups/polkit-1.created-by-faceauth" || fail "the marker is a copy of exactly what setup wrote" "$(cat "$backups/polkit-1.created-by-faceauth")"
+/usr/bin/sed -i '1i auth      sufficient pam_fprintd.so' "$pamd/polkit-1"
+keep_pam=1 run_script "$remove" present ok match || fail "removal succeeds after a fingerprint setup" "$(cat "$calls")"
+[[ -f $pamd/polkit-1 ]] || fail "removal keeps a created polkit-1 that gained a fingerprint line"
+grep -q pam_fprintd.so "$pamd/polkit-1" || fail "removal keeps the pam_fprintd line" "$(cat "$pamd/polkit-1")"
+! grep -q pam_faceauth "$pamd/polkit-1" || fail "removal still takes our line out of the changed polkit-1" "$(cat "$pamd/polkit-1")"
+grep -q '^auth       include      system-auth' "$pamd/polkit-1" || fail "the rest of the created stack stays" "$(cat "$pamd/polkit-1")"
+[[ ! -e $backups/polkit-1.created-by-faceauth ]] || fail "removal drops its claim on a polkit-1 it no longer owns"
+pass "removal keeps a created polkit-1 that gained a fingerprint line and strips only ours"
+
+# A marker from an older setup is an empty file, so it never matches: the
+# file is stripped, not deleted.
+rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
+run_script "$setup" present ok match || fail "setup succeeds before an old-marker removal" "$(cat "$calls")"
+: >"$backups/polkit-1.created-by-faceauth"
+keep_pam=1 run_script "$remove" present ok match || fail "removal succeeds with an empty marker" "$(cat "$calls")"
+[[ -f $pamd/polkit-1 ]] || fail "an empty marker does not license deleting polkit-1"
+! grep -q pam_faceauth "$pamd/polkit-1" || fail "our line still goes with an empty marker" "$(cat "$pamd/polkit-1")"
+pass "an empty marker from an older setup strips the face line instead of deleting the file"
 
 # With the daemon stopped, the templates cannot go through it, so removal
 # deletes the files itself: the template, sealed or plaintext (a machine

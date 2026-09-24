@@ -24,6 +24,10 @@ If your laptop has an infrared camera whose illuminator the kernel can drive, yo
 
 A color webcam won't do: it can't see in the dark and a photo fools it. The IR camera refuses a paper print by how differently paper and skin reflect its own light, and in testing a phone or screen held up to it has read as glare, not a face. It can't tell a look-alike or a 3D mask from you, so keep a strong password behind it; every failure falls back to the password. The [FaceAuth README](https://github.com/mellismas/omarchy-faceauth) lists what it resists and what it doesn't.
 
+Once it's set up, `sudo` and system authorization prompts open a small window naming what's asking. Nod twice to allow it, or type your password there; shake twice, or close the window, to refuse, and `sudo` falls back to its terminal prompt. With the lid closed you go straight to the password, and a fingerprint or Fido2 set up alongside goes first. A request typed directly into an `ssh` session never reaches the camera; a program started through your own desktop session, even from an ssh login, can still open the window, which is why it names what is being asked.
+
+Nothing marks the window as the real one: a program already running under your account could draw a look-alike and collect a password typed into it. Type your password into it only for a request you just made, and prefer the nod, which a fake window can't use.
+
 Your enrollment is a set of numbers derived from your face, never images, kept root-only and sealed to the TPM when the machine has one. _Setup > Security > Face_ also holds _Add Look_, _Tune Gestures_ and _Status_ (`faceauth doctor`).
 
 You can remove face authentication under _Remove > Security > Face_ in the Omarchy menu.
