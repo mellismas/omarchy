@@ -19,7 +19,9 @@ stub_bin="$test_tmp/bin"
 calls="$test_tmp/calls.log"
 pamd="$test_tmp/pam.d"
 backups="$test_tmp/backups"
-mkdir -p "$stub_bin" "$pamd" "$backups"
+store="$test_tmp/store"
+out="$test_tmp/out.log"
+mkdir -p "$stub_bin" "$pamd" "$backups" "$store"
 
 cleanup() {
   rm -rf "$test_tmp"
@@ -39,9 +41,10 @@ printf 'sudo' >>"$TEST_LOG"
 printf '\t%s' "$@" >>"$TEST_LOG"
 printf '\n' >>"$TEST_LOG"
 
-# Every path under /etc/pam.d or /var/backups/faceauth is redirected into the
-# scratch tree, so the real scripts run unchanged and never touch the host.
-map() { local p=$1; p=${p/#\/etc\/pam.d/$TEST_PAMD}; p=${p/#\/var\/backups\/faceauth/$TEST_BACKUPS}; printf '%s' "$p"; }
+# Every path under /etc/pam.d, /var/backups/faceauth or /var/lib/faceauth is
+# redirected into the scratch tree, so the real scripts run unchanged and
+# never touch the host.
+map() { local p=$1; p=${p/#\/etc\/pam.d/$TEST_PAMD}; p=${p/#\/var\/backups\/faceauth/$TEST_BACKUPS}; p=${p/#\/var\/lib\/faceauth/$TEST_STORE}; printf '%s' "$p"; }
 
 case "${1:-}" in
   tee)
@@ -56,8 +59,16 @@ case "${1:-}" in
     /usr/bin/sed -i "$3" "$(map "$4")"
     ;;
   test)
-    [[ $2 == -f ]] || { echo "unexpected test: $*" >&2; exit 97; }
-    [[ -f $(map "$3") ]]
+    [[ $2 == -f || $2 == -d ]] || { echo "unexpected test: $*" >&2; exit 97; }
+    [[ $2 == -f && -f $(map "$3") || $2 == -d && -d $(map "$3") ]]
+    ;;
+  find)
+    # The store is root-only on a real machine, so the deletion runs under
+    # sudo with the patterns spelled out as paths; every argument that names
+    # the store is mapped, the rest (predicates, parentheses) pass through.
+    [[ ${TEST_FIND_FAIL:-0} == 0 ]] || exit 1
+    shift; args=(); for a in "$@"; do args+=("$(map "$a")"); done
+    /usr/bin/find "${args[@]}"
     ;;
   cmp)
     [[ $2 == -s && $3 == - ]] || { echo "unexpected cmp: $*" >&2; exit 97; }
@@ -108,7 +119,8 @@ for cmd in omarchy-pkg-add omarchy-pkg-drop systemctl; do
 printf '$cmd' >>"\$TEST_LOG"
 printf '\t%s' "\$@" >>"\$TEST_LOG"
 printf '\n' >>"\$TEST_LOG"
-[[ \${1:-} == is-active ]] && exit 0
+# The daemon is running unless a case says otherwise.
+if [[ \${1:-} == is-active ]]; then [[ \${TEST_ACTIVE:-yes} == yes ]]; exit \$?; fi
 exit 0
 SH
 done
@@ -143,11 +155,11 @@ occurrences=$(grep -c '/etc/pam.d/omarchy-lock-face' "$setup") || occurrences=0
 occurrences=$(grep -c '/etc/pam.d/omarchy-lock-face' "$remove") || occurrences=0
 (( occurrences == 2 )) || fail "removal names the lock-face PAM service exactly twice (the check and the rm)" "found $occurrences occurrences"
 retarget() {
-  sed -e "s|/etc/pam.d|$pamd|g" -e "s|/var/backups/faceauth|$backups|g" "$1"
+  sed -e "s|/etc/pam.d|$pamd|g" -e "s|/var/backups/faceauth|$backups|g" -e "s|/var/lib/faceauth|$store|g" "$1"
 }
 setup_copy="$test_tmp/setup.sh"; retarget "$setup" >"$setup_copy"
 remove_copy="$test_tmp/remove.sh"; retarget "$remove" >"$remove_copy"
-! grep -qE '/etc/pam\.d|/var/backups/faceauth' "$setup_copy" "$remove_copy" || fail "the retargeted copies name no real path"
+! grep -qE '/etc/pam\.d|/var/backups/faceauth|/var/lib/faceauth' "$setup_copy" "$remove_copy" || fail "the retargeted copies name no real path"
 pass "the scripts name the PAM service as expected, and the test drives retargeted copies"
 
 run_script() {
@@ -158,8 +170,8 @@ run_script() {
   : >"$calls"
   # keep_pam=1 leaves the sudo stack as the previous run left it.
   (( ${keep_pam:-0} )) || printf 'auth include system-auth\n' >"$pamd/sudo"
-  TEST_LOG="$calls" TEST_PAMD="$pamd" TEST_BACKUPS="$backups" TEST_CAMERA="$camera" TEST_ENROLL="$enroll" TEST_AUTH="$auth" \
-    PATH="$stub_bin:$PATH" bash "$script" "$@" </dev/null >/dev/null 2>&1
+  TEST_LOG="$calls" TEST_PAMD="$pamd" TEST_BACKUPS="$backups" TEST_STORE="$store" TEST_CAMERA="$camera" TEST_ENROLL="$enroll" TEST_AUTH="$auth" \
+    PATH="$stub_bin:$PATH" bash "$script" "$@" </dev/null >"$out" 2>&1
 }
 
 # No IR camera: nothing is installed and nothing is written.
@@ -223,6 +235,7 @@ drop_line=$(grep -n 'omarchy-pkg-drop' "$calls" | head -1 | cut -d: -f1)
 grep -q $'faceauth\ttemplates\tdelete' "$calls" || fail "removal deletes the templates by default" "$(cat "$calls")"
 ! grep -q pam_faceauth "$pamd/sudo" || fail "removal takes the consent line off the sudo stack" "$(cat "$pamd/sudo")"
 [[ ! -e $pamd/polkit-1 ]] || fail "removal deletes the polkit-1 file that setup created"
+[[ ! -e $backups/polkit-1.created-by-faceauth ]] || fail "removal deletes the marker with the file it stood for"
 pass "removal takes the PAM service out first, deletes the templates, then drops the package"
 
 : >"$calls"
@@ -255,3 +268,64 @@ keep_pam=1 run_script "$remove" present ok match || fail "removal succeeds on an
 grep -q $'sudo\tcp' "$calls" || fail "an unchanged stack is restored from the backup" "$(cat "$calls")"
 [[ ! -e $backups/sudo.pre-face ]] || fail "removal deletes the backup it restored"
 pass "removal restores the backup on an unchanged stack and deletes it"
+
+# A polkit-1 that setup created is deleted only while it is still exactly what
+# setup wrote. omarchy-setup-security-fingerprint inserts pam_fprintd.so into
+# the same file; deleting the file would take the fingerprint with it, so
+# removal must strip only our line and keep the rest.
+rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
+run_script "$setup" present ok match || fail "setup succeeds before a later fingerprint setup" "$(cat "$calls")"
+[[ -f $backups/polkit-1.created-by-faceauth ]] || fail "setup remembers that it created polkit-1"
+/usr/bin/cmp -s "$pamd/polkit-1" "$backups/polkit-1.created-by-faceauth" || fail "the marker is a copy of exactly what setup wrote" "$(cat "$backups/polkit-1.created-by-faceauth")"
+/usr/bin/sed -i '1i auth      sufficient pam_fprintd.so' "$pamd/polkit-1"
+keep_pam=1 run_script "$remove" present ok match || fail "removal succeeds after a fingerprint setup" "$(cat "$calls")"
+[[ -f $pamd/polkit-1 ]] || fail "removal keeps a created polkit-1 that gained a fingerprint line"
+grep -q pam_fprintd.so "$pamd/polkit-1" || fail "removal keeps the pam_fprintd line" "$(cat "$pamd/polkit-1")"
+! grep -q pam_faceauth "$pamd/polkit-1" || fail "removal still takes our line out of the changed polkit-1" "$(cat "$pamd/polkit-1")"
+grep -q '^auth       include      system-auth' "$pamd/polkit-1" || fail "the rest of the created stack stays" "$(cat "$pamd/polkit-1")"
+[[ ! -e $backups/polkit-1.created-by-faceauth ]] || fail "removal drops its claim on a polkit-1 it no longer owns"
+pass "removal keeps a created polkit-1 that gained a fingerprint line and strips only ours"
+
+# A marker from an older setup is an empty file, so it never matches: the
+# file is stripped, not deleted.
+rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
+run_script "$setup" present ok match || fail "setup succeeds before an old-marker removal" "$(cat "$calls")"
+: >"$backups/polkit-1.created-by-faceauth"
+keep_pam=1 run_script "$remove" present ok match || fail "removal succeeds with an empty marker" "$(cat "$calls")"
+[[ -f $pamd/polkit-1 ]] || fail "an empty marker does not license deleting polkit-1"
+! grep -q pam_faceauth "$pamd/polkit-1" || fail "our line still goes with an empty marker" "$(cat "$pamd/polkit-1")"
+pass "an empty marker from an older setup strips the face line instead of deleting the file"
+
+# With the daemon stopped, the templates cannot go through it, so removal
+# deletes the files itself: the template, the blobs set aside as unreadable,
+# and the gesture recordings, this user's only.
+seed_store() {
+  rm -rf "$store"; mkdir -p "$store/gestures"
+  : >"$store/$USER.cred"; : >"$store/$USER.cred.unreadable-1700000000"
+  : >"$store/gestures/nod-$USER-1.txt"; : >"$store/gestures/shake-$USER-2.txt"
+  : >"$store/other.cred"; : >"$store/gestures/nod-other-1.txt"
+}
+seed_store
+TEST_ACTIVE=no run_script "$remove" present ok match || fail "removal succeeds with the daemon stopped" "$(cat "$out")"
+! grep -q $'faceauth\ttemplates\tdelete' "$calls" || fail "a stopped daemon is not asked to delete" "$(cat "$calls")"
+[[ ! -e $store/$USER.cred ]] || fail "removal deletes the template directly when the daemon is stopped"
+[[ ! -e $store/$USER.cred.unreadable-1700000000 ]] || fail "removal deletes the set-aside blob"
+[[ ! -e $store/gestures/nod-$USER-1.txt && ! -e $store/gestures/shake-$USER-2.txt ]] || fail "removal deletes the gesture recordings"
+[[ -e $store/other.cred && -e $store/gestures/nod-other-1.txt ]] || fail "removal leaves another user's template and recordings alone"
+grep -q 'Face authentication has been removed' "$out" || fail "the success line is printed when the templates went" "$(cat "$out")"
+pass "with the daemon stopped, removal deletes this user's template files itself"
+
+# A deletion that fails is said out loud and the success line is withheld.
+seed_store
+TEST_ACTIVE=no TEST_FIND_FAIL=1 run_script "$remove" present ok match && fail "removal fails when the templates could not be deleted"
+grep -q 'templates remain' "$out" || fail "removal warns that the templates remain" "$(cat "$out")"
+! grep -q 'Face authentication has been removed\.' "$out" || fail "the success line is withheld when the templates remain" "$(cat "$out")"
+[[ -e $store/$USER.cred ]] || fail "the failed deletion left the template (the stub deleted nothing)"
+pass "removal withholds the success line when the templates could not be deleted"
+
+# The daemon's delete failing falls back to the direct deletion too.
+seed_store
+: >"$calls"
+TEST_ACTIVE=no run_script "$remove" present ok match --keep-templates || fail "removal with --keep-templates succeeds with the daemon stopped"
+[[ -e $store/$USER.cred ]] || fail "--keep-templates keeps the template with the daemon stopped"
+pass "--keep-templates keeps the template files with the daemon stopped"

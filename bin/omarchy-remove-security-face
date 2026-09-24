@@ -50,24 +50,44 @@ echo -e "\e[32mRemoving face authentication.\n\e[0m"
 # PAM first, always, whatever else is chosen: dropping the module while the
 # stacks reference it would leave them unable to authenticate.
 restore_or_strip /etc/pam.d/sudo
-if sudo test -f "$created_marker"; then
-  # Setup created this override; deleting it returns polkit to the vendor stack.
+if sudo test -f "$created_marker" && [[ -f /etc/pam.d/polkit-1 ]] && sudo cmp -s - "$created_marker" </etc/pam.d/polkit-1; then
+  # Setup created this override and nothing has touched it since: deleting it
+  # returns polkit to the vendor stack. The marker is the copy setup kept of
+  # what it wrote; a marker from an older setup is empty and never matches.
   echo "Removing the polkit override that setup created..."
   sudo rm -f /etc/pam.d/polkit-1 "$created_marker"
 else
+  # Either setup found a file here, or the one it created has since gained
+  # lines of its own (a fingerprint or FIDO2 setup inserts into the same
+  # file). Only our line goes; the file stays for whatever else is in it now,
+  # and the marker goes so a later run cannot claim the file again.
   restore_or_strip /etc/pam.d/polkit-1
+  if sudo test -f "$created_marker"; then sudo rm -f "$created_marker"; fi
 fi
 if [[ -f /etc/pam.d/omarchy-lock-face ]]; then
   echo "Removing lock screen face authentication..."
   sudo rm -f /etc/pam.d/omarchy-lock-face
 fi
 
+# The daemon deletes the templates when it is running, so its cache goes with
+# them. When it is stopped, or its delete fails, the files go directly: the
+# template, any blob enrolment set aside as unreadable, and the gesture
+# recordings, all named for the user under the root-only store. A run that
+# says "removed" must not leave a face on disk, so a failure here is said
+# out loud and the success line is withheld.
+templates_left=0
 if (( keep_templates )); then
   echo "Keeping the enrolled templates in /var/lib/faceauth (root-only)."
 else
   echo "Deleting the enrolled templates..."
-  if systemctl is-active --quiet faceauth.service; then
-    sudo faceauth templates delete --user "$target_user" >/dev/null || true
+  if ! { systemctl is-active --quiet faceauth.service && sudo faceauth templates delete --user "$target_user" >/dev/null; }; then
+    # No store at all means nothing was ever enrolled here; that is not a failure.
+    if sudo test -d /var/lib/faceauth; then
+      sudo find /var/lib/faceauth -maxdepth 2 \( -path "/var/lib/faceauth/$target_user.cred" -o -path "/var/lib/faceauth/$target_user.cred.unreadable-*" -o -path "/var/lib/faceauth/gestures/*-$target_user-*.txt" \) -type f -delete || templates_left=1
+    fi
+  fi
+  if (( templates_left )); then
+    echo -e "\e[31mThe enrolled templates could not be deleted; they are still under /var/lib/faceauth (root-only).\e[0m" >&2
   fi
 fi
 
@@ -77,4 +97,9 @@ sudo systemctl disable --now faceauth.service 2>/dev/null || true
 echo "Removing the face authentication package..."
 omarchy-pkg-drop omarchy-faceauth
 
+if (( templates_left )); then
+  echo -e "\e[31mFace authentication has been removed, but the enrolled templates remain. Delete them with:\e[0m" >&2
+  echo "  sudo sh -c 'rm -f /var/lib/faceauth/$target_user.cred /var/lib/faceauth/$target_user.cred.unreadable-* /var/lib/faceauth/gestures/*-$target_user-*.txt'" >&2
+  exit 1
+fi
 echo -e "\e[32mFace authentication has been removed.\e[0m"

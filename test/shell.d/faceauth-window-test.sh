@@ -43,6 +43,7 @@ assert(/anchors\.right: parent\.right/.test(answerRow) && /anchors\.verticalCent
 assert(/root\.passwordlessArmed = ""/.test(consent.match(/if \(fresh\) \{([\s\S]*?)\n    \}/)[1]), 'a new request starts with nothing armed')
 assert(/"  and passwordless sudo for " \+ root\.passwordlessArmed \+ " min"/.test(consent.split('\n').find(l => /readonly property string commandLine:/.test(l)) || ''), 'once armed, the command line the user reads includes the passwordless spell')
 assert(/Passwordless sudo armed: /.test(consent), 'once armed the button gives way to a note')
+assert(/\(root\.caller \|\| \{\}\)\.clipped === true \? "  \[command too long to show in full\]" : ""/.test(consent), 'a command the daemon cut is marked as such on the line the user reads')
 
 // Approve is the mouse form of Enter: it submits the typed password only.
 const approve = consent.split(/\bButton \{/).slice(1).find(b => /text: "Approve"/.test(b))
@@ -83,6 +84,23 @@ for (const [name, block] of [['command', commandBlock], ['requester', requesterB
   assert(!/elide/.test(block), `the ${name} line is never elided`)
 }
 
+// The command area is height-bounded and scrolls, so a command that wraps to
+// hundreds of lines (or carries line separators) cannot push the requester
+// line and the buttons off a card the user cannot move. Nothing is cut: the
+// Text inside keeps its full height and the area scrolls over it.
+const flickChunk = consent.split(/\bFlickable \{/).slice(1).find(chunk => /id: commandArea/.test(chunk)) || ''
+const commandArea = flickChunk.split(/\n        \}\n/)[0]
+assert(commandArea, 'the command line sits in a Flickable')
+assert(/text: root\.commandLine/.test(commandArea), 'the Flickable holds the command line')
+assert(/height: Math\.min\(commandText\.implicitHeight, commandArea\.maxHeight\)/.test(commandArea), 'the area grows with the command up to a bound')
+const bound = commandArea.match(/maxHeight: panel\.height > 0 \? Math\.round\(panel\.height \* ([0-9.]+)\)/)
+assert(bound && Number(bound[1]) > 0 && Number(bound[1]) <= 0.5, 'the bound is a fraction of the screen height of at most a half', String(bound && bound[1]))
+assert(/contentHeight: commandText\.implicitHeight/.test(commandArea), 'the scroll range is the whole command')
+assert(/clip: true/.test(commandArea), 'the area clips to its bound')
+assert(/flickableDirection: Flickable\.VerticalFlick/.test(commandArea), 'the area scrolls vertically')
+assert(/interactive: contentHeight > height/.test(commandArea), 'the area scrolls only when the command overflows it')
+assert(/ScrollBar\.vertical:/.test(commandArea), 'the area shows a scroll bar when it overflows')
+
 const pendingLine = consent.split('\n').find(line => /readonly property bool pending:/.test(line)) || ''
 for (const state of ['scanning', 'nod', 'confirming', 'password', 'locked']) {
   assert(pendingLine.includes(`root.state === "${state}"`), `${state} is a pending state`, pendingLine)
@@ -107,6 +125,7 @@ assert(fresh, 'a new token is handled as a fresh request')
 assert(/passwordField\.text = ""/.test(fresh[1]), 'a new request clears the password field')
 assert(/root\.answer\(\["--ack"\], ""\)/.test(fresh[1]), 'a new request is acknowledged to the daemon with its token')
 assert(/var fresh = !root\.opened \|\| token !== root\.token/.test(open[1]), 'fresh means a token the window has not seen')
+assert(/commandArea\.contentY = 0/.test(fresh[1]), 'a new request starts at the top of the command area')
 
 // The card is drawn on the output that holds the camera.
 const panelBlock = consent.split(/\bPanelWindow \{/)[1] || ''

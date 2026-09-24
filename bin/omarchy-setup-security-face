@@ -60,11 +60,13 @@ setup_pam_config() {
     fi
   else
     # No file in /etc/pam.d means polkit runs the vendor stack; an override
-    # there must carry the whole stack, not just our line. Remember that we
-    # created it, so removal deletes it and polkit returns to the vendor stack.
+    # there must carry the whole stack, not just our line. The marker keeps a
+    # copy of exactly what was written: removal deletes the file, returning
+    # polkit to the vendor stack, only while it still matches that copy. A
+    # fingerprint or FIDO2 line added later makes the file someone else's too,
+    # and then removal strips our line and leaves the rest in place.
     echo "Creating polkit configuration with face authentication..."
     sudo install -dm700 "$backup_dir"
-    sudo touch "$created_marker"
     # omarchy:heredoc-expands paths=polkit_face_line -- $polkit_face_line is the constant PAM
     # line set at the top of this script, never user input; nothing else expands.
     sudo tee /etc/pam.d/polkit-1 >/dev/null <<EOF
@@ -75,6 +77,7 @@ account    include      system-auth
 password   include      system-auth
 session    include      system-auth
 EOF
+    sudo cp -p /etc/pam.d/polkit-1 "$created_marker"
   fi
 }
 

@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls as Controls
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
@@ -45,7 +46,7 @@ Item {
   readonly property bool verified: (root.caller || {}).verified === true
   // Once the passwordless button is armed, what the nod approves includes
   // it, so the line the user reads says so.
-  readonly property string commandLine: (root.verified ? "Run as root: " : "Unverified: ") + String((root.caller || {}).command || "") + (root.passwordlessArmed.length > 0 ? "  and passwordless sudo for " + root.passwordlessArmed + " min" : "")
+  readonly property string commandLine: (root.verified ? "Run as root: " : "Unverified: ") + String((root.caller || {}).command || "") + (root.passwordlessArmed.length > 0 ? "  and passwordless sudo for " + root.passwordlessArmed + " min" : "") + ((root.caller || {}).clipped === true ? "  [command too long to show in full]" : "")
 
   // Line 2: who asked, as the daemon found it in /proc.
   readonly property string requesterText: "Requester: " + String((root.caller || {}).who || "")
@@ -93,6 +94,7 @@ Item {
       root.token = token
       passwordField.text = ""
       root.passwordlessArmed = ""
+      commandArea.contentY = 0
       Qt.callLater(function() { passwordField.forceActiveFocus() })
       if (token.length > 0) root.answer(["--ack"], "")
     }
@@ -231,16 +233,35 @@ Item {
           font.bold: true
         }
 
-        Text {
+        // The whole command, wrapped, never cut: no line limit and no
+        // elision, so nothing is hidden. The area grows with the command up to
+        // two fifths of the screen and then scrolls, so a long command, or one
+        // full of line separators, cannot push the requester line and the
+        // buttons off the card. The card is a layer surface that cannot be
+        // moved, so anything pushed off it would be unreachable.
+        Flickable {
+          id: commandArea
           width: parent.width
-          // The whole command, wrapped, never cut: the daemon caps it at 2000
-          // characters. No line limit and no elision, so nothing is hidden.
-          text: root.commandLine
-          textFormat: Text.PlainText
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+          readonly property int maxHeight: panel.height > 0 ? Math.round(panel.height * 0.4) : commandText.implicitHeight
+          height: Math.min(commandText.implicitHeight, commandArea.maxHeight)
+          contentWidth: width
+          contentHeight: commandText.implicitHeight
+          clip: true
+          boundsBehavior: Flickable.StopAtBounds
+          flickableDirection: Flickable.VerticalFlick
+          interactive: contentHeight > height
+          Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
+
+          Text {
+            id: commandText
+            width: commandArea.width
+            text: root.commandLine
+            textFormat: Text.PlainText
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+          }
         }
 
         Text {

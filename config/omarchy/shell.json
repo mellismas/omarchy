@@ -60,6 +60,9 @@
           "id": "omarchy.monitor"
         },
         {
+          "id": "omarchy.faceauth.presence"
+        },
+        {
           "id": "omarchy.power"
         }
       ]

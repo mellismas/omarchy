@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "omarchy.faceauth.presence",
+  "name": "Face Presence",
+  "version": "1.0.0",
+  "author": "Omarchy",
+  "description": "Walk-away lock mode for face authentication: default locks when nobody is there, secure locks when the enrolled user is not in frame.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Face presence",
+    "description": "Toggle the walk-away lock between default and secure mode. Hidden unless the presence watch is on.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

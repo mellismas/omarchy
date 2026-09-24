@@ -37,6 +37,7 @@ User-installed plugins live alongside these conceptually but on disk under
 | OSD           | `omarchy.osd`             | `panel`                 | `osd/Osd.qml`                         |
 | Polkit agent  | `omarchy.polkit`          | `service`               | `polkit/PolkitAgent.qml`              |
 | Face consent  | `omarchy.faceauth`        | `overlay`               | `faceauth/Consent.qml`                |
+| Face presence | `omarchy.faceauth.presence` | `bar-widget`          | `faceauth-presence/BarWidget.qml`     |
 
 First-party bar-only widgets also carry manifests next to their QML files,
 e.g. `bar/widgets/Workspaces.manifest.json`. Rich popup widgets live in their
