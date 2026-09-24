@@ -152,4 +152,27 @@ const status = bodyOf(serviceQml, 'function status(): string', 'the status IPC')
 assert(!/face-probe|face-state|faceState|faceProbe|faceAuthenticating|faceFailures/.test(status),
   'lock status carries no face-probe or face-state detail')
 assert(/authenticating: root\.authenticating/.test(status), 'lock status keeps the coarse authenticating flag')
+
+// `lock lockPresence` keeps the panel lit for ten minutes, and a lit panel
+// runs the scan loop. Any process of this uid can call it, so one lock gets
+// one lit window: a repeat leaves the blank timer alone.
+const lockPresence = bodyOf(serviceQml, 'function lockPresence(): string', 'the lockPresence IPC')
+assert(
+  /if \(root\.currentlyLocked\(\)\) \{\s*if \(root\.presenceLitUsed\) return "ok"\s*root\.presenceLitUsed = true\s*root\.blankDelayMs = root\.blankDelayPresenceMs/.test(lockPresence),
+  'a repeated lockPresence on a lock that already had its lit window does not extend it'
+)
+// A stale `locked` binding once read true after an unlock (upstream #14978), so a
+// walk-away lock would have been skipped. The decision reads the state afresh.
+assert(!/root\.locked\b/.test(lockPresence), 'the walk-away lock decides from currentlyLocked(), never the locked binding')
+assert(
+  (lockPresence.match(/root\.presenceLitUsed = true/g) || []).length === 2 &&
+    lockPresence.indexOf('root.presenceLitUsed = true') < lockPresence.indexOf('root.blankDelayMs = root.blankDelayPresenceMs'),
+  'the lit window is spent before it is granted, on both the locked and the locking path'
+)
+const beginLock = bodyOf(serviceQml, 'function beginLock()', 'beginLock')
+const finishUnlock = bodyOf(serviceQml, 'function finishUnlock()', 'finishUnlock')
+assert(
+  beginLock.indexOf('presenceLitUsed = false') !== -1 && finishUnlock.indexOf('presenceLitUsed = false') !== -1,
+  'the lit window is granted again only with a new lock'
+)
 JS

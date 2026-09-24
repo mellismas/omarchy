@@ -71,6 +71,18 @@ Item {
   property bool strandedLock: false
   property bool strandedLockResolved: false
 
+  // How long the panel stays lit after a lock. A lock the presence watch took
+  // keeps it lit for ten minutes: the owner may be a few feet away and wants
+  // to see the screen waiting for them.
+  readonly property int blankDelayDefaultMs: 5000
+  readonly property int blankDelayPresenceMs: 600000
+  property int blankDelayMs: 5000
+  // A lock gets one presence-lit window. The daemon asks for it once, when
+  // the owner walks away; every later `lockPresence` on the same lock keeps
+  // the ordinary blank timer, so no process of this uid can hold the panel
+  // lit (and the face scan, camera and illuminator with it) by repeating the
+  // call. Cleared when the lock ends.
+  property bool presenceLitUsed: false
   // After a few failed scans with the panel lit (nobody there), the loop
   // stops scanning and probes instead, exactly as it does while blank.
   property int faceFailures: 0
@@ -261,6 +273,7 @@ Item {
     }
 
     resetAuthenticationState()
+    presenceLitUsed = false
     lockRequested = true
     armBlankTimer()
     logEvent("lock-requested")
@@ -283,12 +296,15 @@ Item {
     pendingSessionLockTimer.stop()
     resetAuthenticationState()
     idleBlankTimer.stop()
+    blankDelayMs = blankDelayDefaultMs
+    presenceLitUsed = false
     sessionLock.locked = false
     logEvent("unlocked")
     runWake()
   }
 
   function armBlankTimer() {
+    idleBlankTimer.interval = blankDelayMs
     idleBlankTimer.armedAt = Date.now()
     idleBlankTimer.restart()
   }
@@ -1138,7 +1154,28 @@ Item {
       if (!root.passwordPamConfigured) return "missing-pam"
       // omarchy-system-sleep-lock asks for the lock before every suspend.
       if (root.currentlyLocked()) root.noteSleepRequested()
+      root.blankDelayMs = root.blankDelayDefaultMs
       if (!root.currentlyLocked() && !root.beginLock()) return "failed"
+      return "ok"
+    }
+
+    // A lock taken because the owner walked away: keep the panel lit for ten
+    // minutes so the waiting screen is visible from across the room. The lit
+    // window is granted once per lock; a repeat on a lock that already had
+    // one only locks (a no-op when locked) and leaves the blank timer alone.
+    function lockPresence(): string {
+      if (!root.passwordPamConfigured) return "missing-pam"
+      if (root.currentlyLocked()) {
+        if (root.presenceLitUsed) return "ok"
+        root.presenceLitUsed = true
+        root.blankDelayMs = root.blankDelayPresenceMs
+        root.armBlankTimer()
+        return "ok"
+      }
+      if (!root.beginLock()) return "failed"
+      root.presenceLitUsed = true
+      root.blankDelayMs = root.blankDelayPresenceMs
+      root.armBlankTimer()
       return "ok"
     }
 
