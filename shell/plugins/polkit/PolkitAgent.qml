@@ -35,17 +35,25 @@ Item {
   property bool errorFlash: false
   // pam_fprintd appears in the polkit PAM stack (a sensor is enrolled).
   property bool fingerprintConfigured: false
+  // pam_faceauth with consent is in the stack: the face daemon's own window
+  // handles the request, and this dialog only appears once PAM wants a password.
+  property bool faceConfigured: false
   // Lid shut right now — the reader is physically unreachable, so we fall back
   // to the password even when a sensor is enrolled. Refreshed per request.
   property bool laptopClosed: false
   property int shakeOffset: 0
 
-  readonly property bool dialogVisible: agentActive || closing
+  readonly property bool faceMode: faceConfigured && agentActive && !responseRequired && !submitted && !errorFlash
+  // Set when a face refusal is being turned into a cancel: polkit asks for a
+  // password in the instant before the cancel lands, and the dialog must not
+  // flash for that.
+  property bool refusing: false
+  readonly property bool dialogVisible: (agentActive || closing) && !faceMode && !refusing
   // We show one method at a time. Fingerprint owns the dialog while PAM is
   // waiting on the reader (lid open, sensor enrolled); the moment PAM asks for
   // a password — including immediately when the lid is shut and the clamshell
   // gate skips pam_fprintd — we switch to the password field instead.
-  readonly property bool fingerprintMode: fingerprintConfigured && !laptopClosed && dialogVisible && !responseRequired && !submitted && !errorFlash
+  readonly property bool fingerprintMode: fingerprintConfigured && !laptopClosed && dialogVisible && !faceMode && !responseRequired && !submitted && !errorFlash
   readonly property int cardHeight: panel.height > 0 ? Math.min(fieldHeight + contentMargin * 2, panel.height - Style.gapsOut * 2) : fieldHeight + contentMargin * 2
   // Password mode is a wide field; fingerprint mode collapses to a square that
   // just frames the centered sensor icon.
@@ -57,6 +65,7 @@ Item {
 
   function loadPamConfig(raw) {
     fingerprintConfigured = PolkitModel.fingerprintConfiguredFromPamConfig(raw)
+    faceConfigured = PolkitModel.faceConsentConfiguredFromPamConfig(raw)
   }
 
   function refreshLidState() {
@@ -89,9 +98,67 @@ Item {
     if (responseRequired) submitted = false
   }
 
+  property bool detailsWarned: false
+
+  // The face daemon's consent window names the request; polkit's helper
+  // carries nothing about it, so the agent, which heard the action and the
+  // message from polkitd, tells the daemon as the request starts. It must
+  // do so over its own connection, not through a child process: the daemon
+  // serves a context only to a request whose helper systemd says was
+  // connected by the very process that sent it, so a description planted
+  // by some other process of the user's never labels a request.
+  function tellFaceauth() {
+    var flow = polkitAgent ? polkitAgent.flow : null
+    if (!flow) { console.log("omarchy polkit: no flow to tell faceauth about"); return }
+    if (!faceConfigured) { console.log("omarchy polkit: face not configured, not telling faceauth"); return }
+    console.log("omarchy polkit: telling faceauth about " + flow.actionId)
+    // Said once per shell, not per request: a stock Quickshell without the
+    // details property works, just with the requester unverified on the card.
+    if (flow.details === undefined && !root.detailsWarned) {
+      root.detailsWarned = true
+      console.warn("omarchy polkit: this Quickshell does not expose polkit request details; the face card will show the requester unverified")
+    }
+    // polkitd attaches the pid of the process that asked it (from that
+    // process's D-Bus credentials) and of the process the authorization is
+    // for. A Quickshell that exposes the request's details passes them on;
+    // the daemon reads the requester from /proc itself and shows it as
+    // verified. Without them the card shows polkit's text, unverified.
+    var details = flow.details || {}
+    var context = {
+      user: String(Quickshell.env("USER") || ""),
+      context_action: String(flow.actionId || ""),
+      context_message: String(flow.message || ""),
+      context_cookie: String(flow.cookie || "")
+    }
+    var callerPid = parseInt(String(details["polkit.caller-pid"] || ""), 10)
+    var subjectPid = parseInt(String(details["polkit.subject-pid"] || ""), 10)
+    if (callerPid > 0) context.context_caller_pid = callerPid
+    if (subjectPid > 0) context.context_subject_pid = subjectPid
+    contextSocket.pending = JSON.stringify(context) + "\n"
+    contextSocket.connected = false
+    contextSocket.connected = true
+  }
+
+  Socket {
+    id: contextSocket
+    path: "/run/faceauth/sock"
+    property string pending: ""
+    onConnectionStateChanged: {
+      if (!connected || pending.length === 0) return
+      write(pending)
+      flush()
+      pending = ""
+    }
+    parser: SplitParser {
+      onRead: line => { console.log("omarchy polkit: faceauth answered " + line); contextSocket.connected = false }
+    }
+    onError: error => console.log("omarchy polkit: faceauth socket error " + error)
+  }
+
   function beginFlow() {
     closeTimer.stop()
     closing = false
+    refusing = false
     submitted = false
     passwordInput.text = ""
     refreshLidState()
@@ -141,6 +208,7 @@ Item {
     repeat: false
     onTriggered: {
       closing = false
+      refusing = false
       resetSnapshot()
     }
   }
@@ -163,7 +231,7 @@ Item {
     watchChanges: true
     printErrors: false
     onLoaded: root.loadPamConfig(text())
-    onLoadFailed: root.fingerprintConfigured = false
+    onLoadFailed: { root.fingerprintConfigured = false; root.faceConfigured = false }
     onFileChanged: reload()
   }
 
@@ -190,7 +258,10 @@ Item {
     sourceComponent: PolkitAgent {
       path: "/org/omarchy/PolkitAgent"
 
-      onAuthenticationRequestStarted: root.beginFlow()
+      onAuthenticationRequestStarted: {
+        root.beginFlow()
+        root.tellFaceauth()
+      }
       onIsActiveChanged: {
         if (isActive) root.syncFromFlow()
         else if (!root.closing) root.resetSnapshot()
@@ -229,6 +300,18 @@ Item {
     function onFailedChanged() { root.syncFromFlow() }
 
     function onAuthenticationFailed() {
+      // In face mode a failure with no password submitted from here can only
+      // be the face window's refusal (a head shake, a dismissal): the answer
+      // is no. Polkit would start the helper again and ask forever, so the
+      // agent cancels the request instead, exactly as Escape does. Deferred:
+      // the flow restarts its session right after this signal, and the cancel
+      // has to land on that session for the request to end.
+      if (root.faceConfigured && !root.submitted) {
+        console.log("omarchy polkit: face consent refused, cancelling the request")
+        root.refusing = true
+        Qt.callLater(root.cancelRequest)
+        return
+      }
       root.syncFromFlow()
       root.triggerFailureFeedback()
     }
