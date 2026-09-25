@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # omarchy:summary=Set up face authentication for the lock screen, sudo, and polkit
-# omarchy:args=[--gestures | --walk-away <off|20|30|60>]
+# omarchy:args=[--gestures | --walk-away <off|20|30|60> | --obscured-face-lock <never|240|120|60|30|10|5|2|1> | --secure-obscured-face-lock <10|5|2|1>]
 # omarchy:requires-sudo=true
 
 set -e
@@ -15,7 +15,7 @@ fi
 target_user=$USER
 
 usage() {
-  echo "Usage: omarchy setup security face [--gestures | --walk-away off|20|30|60]" >&2
+  echo "Usage: omarchy setup security face [--gestures | --walk-away off|20|30|60 | --obscured-face-lock never|240|120|60|30|10|5|2|1 | --secure-obscured-face-lock 10|5|2|1]" >&2
   exit 1
 }
 
@@ -117,6 +117,50 @@ account    include                     system-local-login
 EOF
 }
 
+# After a successful enrolment setup asks for both obscured face lock times,
+# with the shipped ones selected, and saves them with `presence
+# obscured-lock`, which never switches the walk-away lock on. With no
+# terminal to ask on, or a choice cancelled, nothing is saved: the times
+# stay as they are, the shipped ones on a first setup.
+obscured_value() {
+  case $1 in
+    "Never (locks only when the chair empties)") echo never ;;
+    "4 hours") echo 240 ;;
+    "2 hours") echo 120 ;;
+    "1 hour") echo 60 ;;
+    "30 minutes") echo 30 ;;
+    "10 minutes") echo 10 ;;
+    "5 minutes") echo 5 ;;
+    "2 minutes") echo 2 ;;
+    "1 minute") echo 1 ;;
+    *) return 1 ;;
+  esac
+}
+
+ask_obscured_face_lock() {
+  local kept="Obscured face lock time left as it was (as shipped: never in default mode, 2 minutes in secure mode). Change it under Setup > Security > Face > Walk-Away Lock."
+  local default_choice secure_choice default_value secure_value
+  if [[ -t 0 ]]; then
+    echo -e "\nWith the walk-away lock on, a face that is partly covered or turned away (a hand on the chin, a look down) keeps the session open while the same shape stays in the chair. How long, in each mode?"
+    if default_choice=$(gum choose --header "Obscured face lock time, default mode" --selected "Never (locks only when the chair empties)" \
+        "Never (locks only when the chair empties)" "4 hours" "2 hours" "1 hour" "30 minutes" "10 minutes" "5 minutes" "2 minutes" "1 minute") \
+      && default_value=$(obscured_value "$default_choice") \
+      && secure_choice=$(gum choose --header "Obscured face lock time, secure mode" --selected "2 minutes" \
+        "10 minutes" "5 minutes" "2 minutes" "1 minute") \
+      && secure_value=$(obscured_value "$secure_choice"); then
+      if sudo faceauth presence obscured-lock --default "$default_value" --secure "$secure_value"; then
+        echo "Obscured face lock time saved: $default_choice in default mode, $secure_choice in secure mode."
+      else
+        echo -e "\e[31mThe obscured face lock time could not be saved; set it under Setup > Security > Face > Walk-Away Lock.\e[0m"
+      fi
+    else
+      echo "$kept"
+    fi
+  else
+    echo "$kept"
+  fi
+}
+
 
 setup_face() {
   echo -e "\e[32mSetting up face authentication.\n\e[0m"
@@ -182,6 +226,7 @@ setup_face() {
       # on their own.
       setup_pam_config
       setup_lock_face_pam
+      ask_obscured_face_lock
       # The walk-away widget joins the bar only on a machine that has face
       # authentication, so nothing polls for a daemon elsewhere. Best-effort,
       # like the plugin migrations: a shell that cannot be asked right now
@@ -200,12 +245,19 @@ setup_face() {
   fi
 }
 
-# The menu's Tune Gestures and Walk-Away rows come through here instead of
-# running sudo faceauth themselves: privileged work goes through an omarchy
-# command, as omarchy-sudo-passwordless does, so the root guard above covers
-# them and the menu file names no sudo. Both leave the rest of setup alone.
-# A walk-away change restarts the service, which also puts the mode chosen
-# from the bar or Super+Ctrl+Shift+L back to the one in the config.
+# The menu's Tune Gestures, Walk-Away and obscured face rows come through here
+# instead of running sudo faceauth themselves: privileged work goes through
+# an omarchy command, as omarchy-sudo-passwordless does, so the root guard
+# above covers them and the menu file names no sudo. Each leaves the rest of
+# setup alone. A walk-away change restarts the service, which also puts the
+# mode chosen from the bar or Super+Ctrl+Shift+L back to the one in the config.
+#
+# The obscured face lock time is how long a face that is partly covered or
+# turned away (a hand on the chin, a look down) keeps the session open while
+# the same shape stays in the chair, one time per walk-away mode. The two
+# flags take only the values the menu offers and go through `presence
+# obscured-lock`, which saves that one time and leaves the walk-away lock on
+# or off as it was.
 case ${1:-} in
   "") setup_face ;;
   --gestures)
@@ -217,6 +269,20 @@ case ${1:-} in
     case $2 in
       off) sudo faceauth presence off --user "$target_user" ;;
       20|30|60) sudo faceauth presence on --user "$target_user" --away-seconds "$2" ;;
+      *) usage ;;
+    esac
+    ;;
+  --obscured-face-lock)
+    (( $# == 2 )) || usage
+    case $2 in
+      never|240|120|60|30|10|5|2|1) sudo faceauth presence obscured-lock --default "$2" ;;
+      *) usage ;;
+    esac
+    ;;
+  --secure-obscured-face-lock)
+    (( $# == 2 )) || usage
+    case $2 in
+      10|5|2|1) sudo faceauth presence obscured-lock --secure "$2" ;;
       *) usage ;;
     esac
     ;;

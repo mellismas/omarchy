@@ -674,6 +674,61 @@
   "setup.security.face.lock.60": {
     "label": "After 60 seconds"
   },
+  "setup.security.face.lock.obscured": {
+    "label": "Obscured Face",
+    "title": "Obscured face lock time",
+    "description": "How long a partly covered or turned-away face keeps the session open while the same shape stays in the chair, in default mode and in secure mode."
+  },
+  "setup.security.face.lock.obscured.default": {
+    "label": "Default mode",
+    "title": "Obscured, default mode",
+    "description": "How long a partly covered or turned-away face keeps the session open in default mode while the same shape stays in the chair."
+  },
+  "setup.security.face.lock.obscured.default.never": {
+    "label": "Never",
+    "description": "Locks only when the chair empties."
+  },
+  "setup.security.face.lock.obscured.default.240": {
+    "label": "4 hours"
+  },
+  "setup.security.face.lock.obscured.default.120": {
+    "label": "2 hours"
+  },
+  "setup.security.face.lock.obscured.default.60": {
+    "label": "1 hour"
+  },
+  "setup.security.face.lock.obscured.default.30": {
+    "label": "30 minutes"
+  },
+  "setup.security.face.lock.obscured.default.10": {
+    "label": "10 minutes"
+  },
+  "setup.security.face.lock.obscured.default.5": {
+    "label": "5 minutes"
+  },
+  "setup.security.face.lock.obscured.default.2": {
+    "label": "2 minutes"
+  },
+  "setup.security.face.lock.obscured.default.1": {
+    "label": "1 minute"
+  },
+  "setup.security.face.lock.obscured.secure": {
+    "label": "Secure mode",
+    "title": "Obscured, secure mode",
+    "description": "How long a partly covered or turned-away face keeps the session open in secure mode while the same shape stays in the chair."
+  },
+  "setup.security.face.lock.obscured.secure.10": {
+    "label": "10 minutes"
+  },
+  "setup.security.face.lock.obscured.secure.5": {
+    "label": "5 minutes"
+  },
+  "setup.security.face.lock.obscured.secure.2": {
+    "label": "2 minutes"
+  },
+  "setup.security.face.lock.obscured.secure.1": {
+    "label": "1 minute"
+  },
   "setup.security.face.status": {
     "label": "Status"
   },

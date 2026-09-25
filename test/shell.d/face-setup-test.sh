@@ -168,7 +168,24 @@ cat >"$stub_bin/omarchy-hw-ir-camera-list" <<'SH'
 echo "/dev/v4l-subdev6  ov7251 3-0060 (Intel IPU3)"
 SH
 
+# gum answers from TEST_GUM, one choice per call separated by |, and logs
+# each call so the test sees what was offered and preselected. "cancel"
+# answers as Escape does.
+cat >"$stub_bin/gum" <<'SH'
+#!/bin/bash
+
+printf 'gum' >>"$TEST_LOG"
+printf '\t%s' "$@" >>"$TEST_LOG"
+printf '\n' >>"$TEST_LOG"
+[[ ${TEST_GUM:-cancel} == cancel ]] && exit 130
+n=$(cat "$TEST_LOG.gum" 2>/dev/null || echo 0)
+echo $((n + 1)) >"$TEST_LOG.gum"
+IFS='|' read -ra answers <<<"$TEST_GUM"
+printf '%s\n' "${answers[$n]}"
+SH
+
 chmod +x "$stub_bin"/*
+ln -s "$ROOT/bin/omarchy-cmd-missing" "$stub_bin/omarchy-cmd-missing"
 
 # The scripts read /etc/pam.d directly (unprivileged reads) before asking sudo
 # to write; a copy retargeted at the scratch tree keeps the host out of it.
@@ -196,6 +213,16 @@ run_script() {
   (( ${keep_pam:-0} )) || printf 'auth include system-auth\n' >"$pamd/sudo"
   TEST_LOG="$calls" TEST_PAMD="$pamd" TEST_BACKUPS="$backups" TEST_STORE="$store" TEST_CAMERA="$camera" TEST_ENROLL="$enroll" TEST_AUTH="$auth" \
     TEST_DOCTOR="${doctor:-pass}" PATH="$stub_bin:$PATH" bash "$script" "$@" </dev/null >"$out" 2>&1
+}
+
+# Setup on the good path with a terminal on stdin, as the menu's floating
+# terminal gives it; $1 is what gum answers.
+run_setup_tty() {
+  : >"$calls"
+  rm -f "$calls.gum"
+  printf 'auth include system-auth\n' >"$pamd/sudo"
+  TEST_LOG="$calls" TEST_PAMD="$pamd" TEST_BACKUPS="$backups" TEST_STORE="$store" TEST_CAMERA=present TEST_ENROLL=ok TEST_AUTH=match \
+    TEST_DOCTOR=pass TEST_GUM="$1" PATH="$stub_bin:$PATH" script -qec "bash '$setup_copy'" /dev/null </dev/null >"$out" 2>&1
 }
 
 # No IR camera: nothing is installed and nothing is written.
@@ -424,6 +451,32 @@ TEST_ACTIVE=no run_script "$remove" present ok match --keep-templates || fail "r
 [[ -e $store/$USER.cred ]] || fail "--keep-templates keeps the template with the daemon stopped"
 pass "--keep-templates keeps the template files with the daemon stopped"
 
+# After enrolment and verification setup asks for both obscured face lock
+# times, the shipped ones selected, and saves them with `presence
+# obscured-lock`, which never switches the walk-away lock. Without a
+# terminal, or with a question cancelled, it saves nothing and says the
+# times stay as they are.
+rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
+run_script "$setup" present ok match || fail "setup without a terminal succeeds" "$(cat "$out")"
+! grep -q $'^gum\|obscured-lock' "$calls" || fail "setup without a terminal asks nothing and saves nothing" "$(cat "$calls")"
+grep -q 'Obscured face lock time left as it was (as shipped: never in default mode, 2 minutes in secure mode)' "$out" || fail "setup without a terminal says the times stay as shipped" "$(cat "$out")"
+rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
+run_setup_tty '10 minutes|5 minutes' || fail "setup with a terminal succeeds" "$(cat "$out")"
+grep -qF $'gum\tchoose\t--header\tObscured face lock time, default mode\t--selected\tNever (locks only when the chair empties)\t' "$calls" || fail "the default-mode question preselects the shipped Never" "$(cat "$calls")"
+grep -qF $'gum\tchoose\t--header\tObscured face lock time, secure mode\t--selected\t2 minutes\t' "$calls" || fail "the secure-mode question preselects the shipped 2 minutes" "$(cat "$calls")"
+grep -q $'^sudo\tfaceauth\tpresence\tobscured-lock\t--default\t10\t--secure\t5$' "$calls" || fail "the answers are saved with presence obscured-lock" "$(cat "$calls")"
+! grep -q $'presence\ton\|presence\toff' "$calls" || fail "saving the times never switches the walk-away lock" "$(cat "$calls")"
+auth_line=$(grep -n $'^faceauth\tauth' "$calls" | head -1 | cut -d: -f1)
+save_line=$(grep -n $'^sudo\tfaceauth\tpresence\tobscured-lock' "$calls" | head -1 | cut -d: -f1)
+(( auth_line < save_line )) || fail "the times are asked for only after a verified enrolment" "$(cat "$calls")"
+grep -q 'Obscured face lock time saved: 10 minutes in default mode, 5 minutes in secure mode' "$out" || fail "setup says what it saved" "$(cat "$out")"
+rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
+run_setup_tty cancel || fail "setup succeeds when the question is cancelled" "$(cat "$out")"
+grep -q $'^gum\tchoose' "$calls" || fail "the cancelled run was asked" "$(cat "$calls")"
+! grep -q 'obscured-lock' "$calls" || fail "a cancelled question saves nothing" "$(cat "$calls")"
+grep -q 'Obscured face lock time left as it was' "$out" || fail "a cancelled question says the times stay" "$(cat "$out")"
+pass "setup asks for the obscured face lock times with a terminal, saves them without switching the lock, and keeps them otherwise"
+
 # Tune Gestures and the Walk-Away rows in the menu run the setup command
 # with a flag, so the menu file names no sudo: the command's own root guard
 # and requires-sudo header cover them, as omarchy-sudo-passwordless does.
@@ -439,6 +492,24 @@ run_script "$setup" present ok match --walk-away 45 && fail "an away time the me
 [[ ! -s $calls ]] || fail "a refused flag runs nothing" "$(cat "$calls")"
 run_script "$setup" present ok match --bogus && fail "an unknown flag is refused"
 pass "the menu's gesture and walk-away rows run through the setup command"
+
+# The obscured face lock flags save one mode's time each through `presence
+# obscured-lock` and take only the menu's values. They never run `presence
+# on` or `off`, so the walk-away lock stays as it was.
+for v in never 240 120 60 30 10 5 2 1; do
+  run_script "$setup" present ok match --obscured-face-lock "$v" || fail "setup --obscured-face-lock $v succeeds" "$(cat "$out")"
+  [[ $(cat "$calls") == $'sudo\tfaceauth\tpresence\tobscured-lock\t--default\t'"$v"$'\nfaceauth\tpresence\tobscured-lock\t--default\t'"$v" ]] || fail "--obscured-face-lock $v saves the default-mode time and nothing else" "$(cat "$calls")"
+done
+for v in 10 5 2 1; do
+  run_script "$setup" present ok match --secure-obscured-face-lock "$v" || fail "setup --secure-obscured-face-lock $v succeeds" "$(cat "$out")"
+  [[ $(cat "$calls") == $'sudo\tfaceauth\tpresence\tobscured-lock\t--secure\t'"$v"$'\nfaceauth\tpresence\tobscured-lock\t--secure\t'"$v" ]] || fail "--secure-obscured-face-lock $v saves the secure-mode time and nothing else" "$(cat "$calls")"
+done
+for bad in "--obscured-face-lock 45" "--obscured-face-lock 0" "--obscured-face-lock none" "--obscured-face-lock" "--obscured-face-lock never 5" "--secure-obscured-face-lock 20" "--secure-obscured-face-lock never" "--secure-obscured-face-lock 0" "--secure-obscured-face-lock" "--hidden-hold none"; do
+  read -ra bad_args <<<"$bad"
+  run_script "$setup" present ok match "${bad_args[@]}" && fail "setup $bad is refused"
+  [[ ! -s $calls ]] || fail "setup $bad runs nothing" "$(cat "$calls")"
+done
+pass "the obscured face lock flags take exactly the menu's choices and save one time each"
 
 menu="$ROOT/default/omarchy/omarchy-menu.jsonc"
 face_rows=$(grep -E '^\s*"(setup|remove)\.security\.face' "$menu")
@@ -467,6 +538,51 @@ bash -c "$(guard_of 30)" && fail "no time row is checked while the watch is off"
 rm -f "$conf"
 bash -c "$(guard_of off)" || fail "with no config at all the Off row is checked" "$(guard_of off)"
 pass "the Walk-Away rows show the current choice from the daemon's config"
+
+# The obscured face lock time is one Obscured Face row under Walk-Away Lock,
+# titled with the full name, opening one panel per mode. It always shows:
+# saving a time never switches the walk-away lock on, so the times can be
+# set while it is off. Each panel keeps one sentence of help as its search
+# description. Every time row runs setup with its value and marks itself
+# from the daemon's config.
+obscured=$(grep '"setup.security.face.lock.obscured":' "$menu")
+[[ $obscured == *'"label":"Obscured Face","title":"Obscured face lock time"'* ]] || fail "one Obscured Face row opens a panel titled with the full name" "$obscured"
+(( $(grep -c '"setup.security.face.lock.[a-z-]*obscured[a-z-]*":' "$menu") == 1 )) || fail "Walk-Away Lock holds one obscured face row" "$(grep 'obscured' "$menu")"
+[[ $(grep '"setup.security.face.lock.obscured.default":' "$menu") == *'"label":"Default mode","title":"Obscured, default mode"'* ]] || fail "the default-mode panel is named for its mode"
+[[ $(grep '"setup.security.face.lock.obscured.secure":' "$menu") == *'"label":"Secure mode","title":"Obscured, secure mode"'* ]] || fail "the secure-mode panel is named for its mode"
+(( $(grep -cE '"setup\.security\.face\.lock\.obscured\.[a-z]+":' "$menu") == 2 )) || fail "Obscured Face holds exactly the two mode panels" "$(grep 'obscured' "$menu")"
+for g in obscured obscured.default obscured.secure; do
+  group=$(grep "\"setup.security.face.lock.$g\":" "$menu")
+  [[ -n $group && $group != *'"when"'* ]] || fail "the $g panel shows whether or not the walk-away lock is on" "$group"
+  [[ $group == *'"description":"How long a partly covered or turned-away face keeps the session open '* ]] || fail "the $g panel says what the time is for" "$group"
+done
+[[ $obscured == *'in default mode and in secure mode.'* ]] || fail "the Obscured Face description names both modes" "$obscured"
+[[ $(grep '"setup.security.face.lock.obscured.default.never":' "$menu") == *'"label":"Never","description":"Locks only when the chair empties."'* ]] || fail "the shipped default-mode row says what never means"
+for v in never 240 120 60 30 10 5 2 1; do
+  grep -q "\"setup.security.face.lock.obscured.default.$v\".*\"checked\".*omarchy-setup-security-face --obscured-face-lock $v'" <<<"$face_rows" || fail "the default-mode $v row runs setup --obscured-face-lock $v and marks itself" "$face_rows"
+done
+for v in 10 5 2 1; do
+  grep -q "\"setup.security.face.lock.obscured.secure.$v\".*\"checked\".*omarchy-setup-security-face --secure-obscured-face-lock $v'" <<<"$face_rows" || fail "the secure-mode $v row runs setup --secure-obscured-face-lock $v and marks itself" "$face_rows"
+done
+(( $(grep -c '"setup.security.face.lock.obscured.default\.' <<<"$face_rows") == 9 && $(grep -c '"setup.security.face.lock.obscured.secure\.' <<<"$face_rows") == 4 )) || fail "the mode panels offer exactly the menu's choices" "$face_rows"
+checked_rows() {
+  local id rows=()
+  for id in default.never default.240 default.120 default.60 default.30 default.10 default.5 default.2 default.1 secure.10 secure.5 secure.2 secure.1; do
+    bash -c "$(guard_of "obscured.$id")" && rows+=("$id")
+  done
+  echo "${rows[*]}"
+}
+printf '[presence]\nenabled = false\nuser = "%s"\naway_seconds = 30.0\n' "$USER" >"$conf"
+[[ $(checked_rows) == "default.never secure.2" ]] || fail "with no time set the shipped choices are checked" "$(checked_rows)"
+printf '[presence]\nenabled = false\nuser = "%s"\naway_seconds = 30.0\nobscured_face_lock = "never"\nsecure_obscured_face_lock = 2\n' "$USER" >"$conf"
+[[ $(checked_rows) == "default.never secure.2" ]] || fail "the written shipped values read the same" "$(checked_rows)"
+printf '[presence]\nenabled = false\nuser = "%s"\naway_seconds = 30.0\nobscured_face_lock = 240\nsecure_obscured_face_lock = 10\n' "$USER" >"$conf"
+[[ $(checked_rows) == "default.240 secure.10" ]] || fail "4 hours and 10 minutes are checked with the lock off, and no row whose number they start with" "$(checked_rows)"
+printf '[presence]\nenabled = true\nuser = "%s"\naway_seconds = 30.0\nobscured_face_lock = 1\nsecure_obscured_face_lock = 1\n' "$USER" >"$conf"
+[[ $(checked_rows) == "default.1 secure.1" ]] || fail "1 minute is checked in each mode and nothing longer" "$(checked_rows)"
+rm -f "$conf"
+[[ $(checked_rows) == "default.never secure.2" ]] || fail "with no config at all the shipped choices are checked" "$(checked_rows)"
+pass "Obscured Face always shows, opens a panel per mode, runs through setup and shows the current time from the daemon's config"
 
 # The IR camera lister reads sysfs, never a device node: it lists an ov7251
 # sensor only beside an ipu3-cio2 capture node, because that graph is the
