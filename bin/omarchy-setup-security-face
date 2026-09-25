@@ -161,6 +161,14 @@ ask_obscured_face_lock() {
   fi
 }
 
+# The closing note: where the walk-away controls this setup put in place
+# live.
+closing_note() {
+  echo
+  echo "Walk-away lock: turn it on or off, and change its away time and the obscured face lock times, under Setup > Security > Face > Walk-Away Lock."
+  echo "While it is on, its icon sits in the top bar: a left click switches between default and secure mode, a right click lists the modes, and Super + Ctrl + Shift + L switches them from the keyboard."
+}
+
 
 setup_face() {
   echo -e "\e[32mSetting up face authentication.\n\e[0m"
@@ -235,6 +243,7 @@ setup_face() {
       echo -e "\e[32m\nFace authentication is set up.\e[0m"
       echo "Lock screen: look at the camera. sudo and polkit: nod twice at the window, shake to refuse, or type your password there."
       echo "Run 'faceauth doctor' any time to see the state of every part."
+      closing_note
     else
       echo -e "\e[31m\nVerification failed. Enrolment is kept; try 'faceauth auth' facing the camera, then run this again.\e[0m"
       exit 1

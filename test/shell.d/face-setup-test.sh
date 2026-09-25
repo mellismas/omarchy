@@ -477,6 +477,24 @@ grep -q $'^gum\tchoose' "$calls" || fail "the cancelled run was asked" "$(cat "$
 grep -q 'Obscured face lock time left as it was' "$out" || fail "a cancelled question says the times stay" "$(cat "$out")"
 pass "setup asks for the obscured face lock times with a terminal, saves them without switching the lock, and keeps them otherwise"
 
+# Setup closes with where the walk-away controls live: the bar icon, the
+# chord and the menu rows for the times. It promises nothing unbuilt, even
+# on a machine with a fingerprint reader and a FIDO2 key.
+hw_bin="$test_tmp/hw-bin"
+mkdir -p "$hw_bin"
+printf '#!/bin/bash\nexit 0\n' >"$hw_bin/omarchy-hw-fingerprint"
+printf '#!/bin/bash\necho "/dev/hidraw3: vendor=0x1050, product=0x0407 (Yubico YubiKey OTP+FIDO+CCID)"\n' >"$hw_bin/fido2-token"
+chmod +x "$hw_bin"/*
+rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
+PATH="$hw_bin:$PATH" run_script "$setup" present ok match || fail "setup succeeds for the closing note" "$(cat "$out")"
+grep -q 'under Setup > Security > Face > Walk-Away Lock' "$out" || fail "the note says where the walk-away and obscured face lock times change" "$(cat "$out")"
+grep -q 'its icon sits in the top bar: a left click switches between default and secure mode, a right click lists the modes, and Super + Ctrl + Shift + L switches them from the keyboard' "$out" || fail "the note explains the bar icon and the chord" "$(cat "$out")"
+! sed -n '/^Walk-away lock:/,$p' "$out" | grep -qi 'two-factor\|mfa\|fingerprint\|security key\|fido' || fail "the note never mentions two-factor mode or second-factor hardware, whatever is present" "$(cat "$out")"
+rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
+run_script "$setup" present ok nomatch && fail "a failed verification still fails"
+! grep -q 'Walk-away lock:' "$out" || fail "a failed setup prints no closing note" "$(cat "$out")"
+pass "setup closes with the walk-away controls, and only after a verified enrolment"
+
 # Tune Gestures and the Walk-Away rows in the menu run the setup command
 # with a flag, so the menu file names no sudo: the command's own root guard
 # and requires-sudo header cover them, as omarchy-sudo-passwordless does.
