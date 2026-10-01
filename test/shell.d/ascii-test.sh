@@ -7,7 +7,9 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 export PATH="$ROOT/bin:$PATH"
 
 columns() {
-  awk 'NR == 1 { print length($0) }'
+  # Every glyph in this fixture occupies one column. Count its Unicode
+  # characters even when the host's awk implementation counts UTF-8 bytes.
+  python3 -c 'import sys; print(len(sys.stdin.readline().rstrip("\n")))'
 }
 
 # The wordmark FIGlet itself draws for this font, so a change to the embedded

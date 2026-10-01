@@ -32,6 +32,11 @@ jobs:
         run: |
           ./test/cli
           ./test/shell.d/vscode-theme-test.sh
+          export OMARCHY_PATH="$GITHUB_WORKSPACE"
+          export PATH="$GITHUB_WORKSPACE/bin:$PATH"
+          for fixture in ascii kernel-headers-migration hermes-remove update-lock; do
+            bash "test/shell.d/$fixture-test.sh"
+          done
 
   arch-cli:
     name: Arch Linux CLI fixtures
@@ -41,7 +46,7 @@ jobs:
     steps:
       # Package installation is confined to this disposable job container.
       - name: Prepare Arch fixture dependencies
-        run: pacman -Syu --noconfirm --needed git jq python ripgrep diffutils fontconfig
+        run: pacman -Syu --noconfirm --needed git jq python ripgrep diffutils fontconfig procps-ng
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
@@ -49,6 +54,11 @@ jobs:
         run: |
           ./test/cli
           ./test/shell.d/vscode-theme-test.sh
+          export OMARCHY_PATH="$GITHUB_WORKSPACE"
+          export PATH="$GITHUB_WORKSPACE/bin:$PATH"
+          for fixture in ascii kernel-headers-migration hermes-remove update-lock; do
+            bash "test/shell.d/$fixture-test.sh"
+          done
 
 # These synthetic fixtures do not establish desktop/session, PAM, camera,
 # TPM, or biometric acceptance; those require the real Omarchy target.
