@@ -51,6 +51,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Negative searches must not turn a missing tool into a passing assertion.
+for command in jq python python3 rg cmp fc-list fc-match; do
+  command -v "$command" >/dev/null || fail "required command is available: $command"
+done
+
 output=$("$CLI" --help)
 assert_output_contains "main help renders" "$output" "Omarchy command center"
 assert_output_contains "main help includes hardware group" "$output" "hw"
