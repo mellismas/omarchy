@@ -51,6 +51,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Negative searches must not turn a missing tool into a passing assertion.
+for command in jq python python3 rg cmp fc-list fc-match; do
+  command -v "$command" >/dev/null || fail "required command is available: $command"
+done
+
 output=$("$CLI" --help)
 assert_output_contains "main help renders" "$output" "Omarchy command center"
 assert_output_contains "main help includes hardware group" "$output" "hw"
@@ -573,17 +578,38 @@ EOF
 chmod +x "$FAKE_BIN/omarchy-toggle-enabled"
 
 mkdir -p "$PI_TMPDIR/.vscode/extensions"
-echo '{"local.omarchy-theme-1.0.0":true}' >"$PI_TMPDIR/.vscode/extensions/.obsolete"
+# The generated extension version follows the palette content. Seed a marker
+# for the version being installed, as VS Code would after uninstalling it.
+THEME_VERSION="1.0.$(cksum "$PI_TMPDIR/.local/state/omarchy/current/theme/vscode-theme.json" | cut -d' ' -f1)"
+jq -n --arg key "local.omarchy-theme-$THEME_VERSION" '{($key): true}' >"$PI_TMPDIR/.vscode/extensions/.obsolete"
 PATH="$FAKE_BIN:$ROOT/bin:$PATH" HOME="$PI_TMPDIR" "$ROOT/bin/omarchy-theme-set-vscode"
 jq -e '.contributes.themes[0].uiTheme == "vs"' "$PI_TMPDIR/.vscode/extensions/omarchy-theme/package.json" >/dev/null || fail "vscode generated light theme uses VS Code light uiTheme"
 pass "vscode generated light theme uses VS Code light uiTheme"
-[[ -L $PI_TMPDIR/.vscode/extensions/omarchy-theme/themes/omarchy-color-theme.json ]] || fail "vscode generated theme references current theme file"
-[[ $(readlink "$PI_TMPDIR/.vscode/extensions/omarchy-theme/themes/omarchy-color-theme.json") == "$PI_TMPDIR/.local/state/omarchy/current/theme/vscode-theme.json" ]] || fail "vscode generated theme references current theme file"
-pass "vscode generated theme references current theme file"
+INSTALLED_THEME="$PI_TMPDIR/.vscode/extensions/omarchy-theme/themes/omarchy-color-theme.json"
+[[ -f $INSTALLED_THEME && ! -L $INSTALLED_THEME ]] || fail "vscode generated theme is a regular file"
+cmp -s "$INSTALLED_THEME" "$PI_TMPDIR/.local/state/omarchy/current/theme/vscode-theme.json" || fail "vscode generated theme contains current palette"
+pass "vscode generated theme contains current palette as a regular file"
+jq -e --arg version "$THEME_VERSION" '.version == $version and .contributes.themes[0]._watch == true' "$PI_TMPDIR/.vscode/extensions/omarchy-theme/package.json" >/dev/null || fail "vscode generated theme enables watching with a content version"
+pass "vscode generated theme enables watching with a content version"
 [[ ! -f $PI_TMPDIR/.vscode/extensions/.obsolete ]] || fail "vscode generated theme clears obsolete extension marker"
 pass "vscode generated theme clears obsolete extension marker"
 jq -e '.[] | select(.identifier.id == "local.omarchy-theme" and .relativeLocation == "omarchy-theme")' "$PI_TMPDIR/.vscode/extensions/extensions.json" >/dev/null || fail "vscode generated theme registers local extension"
 pass "vscode generated theme registers local extension"
+
+PATH="$FAKE_BIN:$ROOT/bin:$PATH" HOME="$PI_TMPDIR" "$ROOT/bin/omarchy-theme-set-vscode"
+jq -e --arg version "$THEME_VERSION" '.version == $version' "$PI_TMPDIR/.vscode/extensions/omarchy-theme/package.json" >/dev/null || fail "vscode identical palette keeps extension version"
+pass "vscode identical palette keeps extension version"
+
+# A new palette must replace the installed content and invalidate the editor's
+# cached theme. The extension registry and manifest must agree on its version.
+jq '.colors["editor.background"] = "#123456"' "$PI_TMPDIR/.local/state/omarchy/current/theme/vscode-theme.json" >"$PI_TMPDIR/changed-theme.json"
+mv "$PI_TMPDIR/changed-theme.json" "$PI_TMPDIR/.local/state/omarchy/current/theme/vscode-theme.json"
+PATH="$FAKE_BIN:$ROOT/bin:$PATH" HOME="$PI_TMPDIR" "$ROOT/bin/omarchy-theme-set-vscode"
+cmp -s "$INSTALLED_THEME" "$PI_TMPDIR/.local/state/omarchy/current/theme/vscode-theme.json" || fail "vscode changed palette replaces installed content"
+NEW_THEME_VERSION=$(jq -r '.version' "$PI_TMPDIR/.vscode/extensions/omarchy-theme/package.json")
+[[ $NEW_THEME_VERSION != "$THEME_VERSION" ]] || fail "vscode changed palette invalidates extension version"
+jq -e --arg version "$NEW_THEME_VERSION" '[.[] | select(.identifier.id == "local.omarchy-theme")] | length == 1 and .[0].version == $version' "$PI_TMPDIR/.vscode/extensions/extensions.json" >/dev/null || fail "vscode changed palette updates extension registry"
+pass "vscode changed palette updates installed content and registered version"
 
 for binary in \
   omarchy-update \

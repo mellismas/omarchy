@@ -113,7 +113,10 @@ wait "$inhibit_update_pid"
 (( inhibitor_holds_lock == 0 )) || fail "update keeps the update lock out of the sleep inhibitor it leaves running"
 pass "omarchy-update keeps the update lock out of its sleep inhibitor"
 
-kill -0 "$inhibitor_pid" 2>/dev/null &&
+# Container PID 1 may leave the stopped orphan as a zombie. It holds no
+# inhibitor or lock; require that it is gone or stopped, never still running.
+inhibitor_state=$(ps -o stat= -p "$inhibitor_pid" || true)
+[[ -z $inhibitor_state || $inhibitor_state == Z* ]] ||
   fail "update waits for its sleep inhibitor to stop before continuing"
 pass "omarchy-update waits for its sleep inhibitor to stop"
 

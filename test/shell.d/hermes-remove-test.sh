@@ -295,7 +295,8 @@ def setup(name):
     runtime.mkdir(parents=True)
     (runtime / '.hermes-bootstrap-complete').touch()
     (home / '.config/Hermes').mkdir(parents=True)
-    env = {**os.environ, 'HOME': str(home), 'XDG_CONFIG_HOME': '', 'PATH': f"{scratch / 'bin'}:/usr/bin:/bin",
+    env = {**os.environ, 'HOME': str(home), 'XDG_CONFIG_HOME': '',
+           'PATH': f"{scratch / 'bin'}:{os.environ['ROOT']}/bin:/usr/bin:/bin",
            'OMARCHY_TEST_GUM_STATUS': '0'}
     for key in ('DROP', 'SYSTEMCTL', 'GUM'):
         log = home / (key + '.log')
