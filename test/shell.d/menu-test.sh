@@ -194,20 +194,20 @@ assert(
   'menu keeps Learn > Omarchy Manual pointed at the published manual'
 )
 assertEqual(
-  defaultById['learn.omarchy-interactive'].label,
-  'Omarchy (Interactive)',
-  'menu offers the interactive course under Learn'
+  defaultById['learn.omarchy-guided'].label,
+  'Omarchy (Guided)',
+  'menu offers the guided course under Learn'
 )
 assertEqual(
-  defaultById['learn.omarchy-interactive'].action,
+  defaultById['learn.omarchy-guided'].action,
   'uwsm-app -- learn-omarchy',
-  'menu launches learn-omarchy for the interactive course'
+  'menu launches learn-omarchy for the guided course'
 )
 const learnItems = defaultItems.filter(item => item.parent === 'learn')
 assertEqual(
   learnItems[learnItems.findIndex(item => item.id === 'learn.omarchy') + 1].id,
-  'learn.omarchy-interactive',
-  'menu lists the interactive course right after the manual'
+  'learn.omarchy-guided',
+  'menu lists the guided course right after the manual'
 )
 assert(
   defaultById['update.omarchy'].icon === '\ue900',
