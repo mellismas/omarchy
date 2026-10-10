@@ -4,12 +4,16 @@ set -euo pipefail
 
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
-# omarchy-setup-security-face installs a package, enrols a face through a
+# omarchy-setup-security-face installs a package, enrolls a face through a
 # root-only daemon, and writes a PAM service. This runs it against stubs and
 # protects the order that keeps a broken setup harmless: nothing is installed
-# without an IR camera, and the PAM service is written only after enrolment
-# has been verified with a live match. omarchy-remove-security-face must take
-# the PAM service out before the package goes.
+# without an IR camera, the 260 MB models package only after the daemon's own
+# camera check has passed, and the PAM service is written only after
+# enrollment has been verified with a live match. omarchy-remove-security-face
+# must take the PAM service out before the package goes.
+
+# A headless sandbox may not set USER; the scripts under test read it too.
+export USER=${USER:-$(id -un)}
 
 setup="$ROOT/bin/omarchy-setup-security-face"
 remove="$ROOT/bin/omarchy-remove-security-face"
@@ -41,9 +45,10 @@ printf 'sudo' >>"$TEST_LOG"
 printf '\t%s' "$@" >>"$TEST_LOG"
 printf '\n' >>"$TEST_LOG"
 
-# Every path under /etc/pam.d, /var/backups/faceauth or /var/lib/faceauth is
-# redirected into the scratch tree, so the real scripts run unchanged and
-# never touch the host.
+# The test runs copies of the scripts retargeted at the scratch tree (below).
+# The stub maps every path under /etc/pam.d, /var/backups/faceauth or
+# /var/lib/faceauth into it as well, so a path the retarget missed still never
+# reaches the host.
 map() { local p=$1; p=${p/#\/etc\/pam.d/$TEST_PAMD}; p=${p/#\/var\/backups\/faceauth/$TEST_BACKUPS}; p=${p/#\/var\/lib\/faceauth/$TEST_STORE}; printf '%s' "$p"; }
 
 case "${1:-}" in
@@ -149,10 +154,19 @@ exit 0
 SH
 done
 
+# The packages are missing, so setup installs them, unless a case says they
+# are there. "daemon" has only the daemon package installed, as a setup that
+# stopped at the camera check leaves the machine.
 cat >"$stub_bin/omarchy-pkg-missing" <<'SH'
 #!/bin/bash
 
-exit 0
+for pkg in "$@"; do
+  case ${TEST_PKG:-missing} in
+    missing) exit 0 ;;
+    daemon) [[ $pkg == omarchy-faceauth ]] || exit 0 ;;
+  esac
+done
+exit 1
 SH
 
 cat >"$stub_bin/omarchy-hw-ir-camera" <<'SH'
@@ -234,73 +248,116 @@ pass "setup refuses without an IR camera before installing anything"
 
 # The kernel cannot drive the illuminator (the stock ov7251 driver has no
 # strobe control): the daemon would refuse every attempt, so setup stops
-# after the install and before enrolment, and says why.
+# after the daemon package and before the models and enrollment, and says why.
 rm -f "$pamd/omarchy-lock-face"
 doctor=illuminator-warn run_script "$setup" present ok match && fail "setup without a strobe control fails"
+grep -qx $'omarchy-pkg-add\tomarchy-faceauth' "$calls" || fail "setup installs the daemon package alone for the check" "$(cat "$calls")"
 grep -q $'faceauth\tdoctor\t--json' "$calls" || fail "setup asks doctor before enrolling" "$(cat "$calls")"
+! grep -q 'omarchy-faceauth-models' "$calls" || fail "setup installs no models when the illuminator cannot be driven" "$(cat "$calls")"
+! grep -q $'models\tfetch' "$calls" || fail "setup fetches no models when the illuminator cannot be driven" "$(cat "$calls")"
 ! grep -q $'systemctl\tenable' "$calls" || fail "setup enables no service when the illuminator cannot be driven" "$(cat "$calls")"
 grep -q 'cannot drive the infrared illuminator' "$out" || fail "setup names the illuminator as the reason" "$(cat "$out")"
 grep -q 'camera.illuminator: warn' "$out" || fail "setup prints the doctor row it stopped on" "$(cat "$out")"
+grep -q 'The face models were not downloaded' "$out" || fail "setup says the models were not downloaded" "$(cat "$out")"
 [[ ! -e $pamd/omarchy-lock-face ]] || fail "setup writes no PAM service when the illuminator cannot be driven"
-! grep -q pam_faceauth "$pamd/sudo" || fail "setup leaves the sudo stack alone when the illuminator cannot be driven"
-pass "setup stops before enrolment when the kernel cannot drive the illuminator"
+[[ $(cat "$pamd/sudo") == "auth include system-auth" ]] || fail "setup leaves the sudo stack alone when the illuminator cannot be driven" "$(cat "$pamd/sudo")"
+pass "setup stops before the models download and enrollment when the kernel cannot drive the illuminator"
 
 # The daemon cannot open the camera at all: same stop, its own message.
 rm -f "$pamd/omarchy-lock-face"
 doctor=ir-fail run_script "$setup" present ok match && fail "setup with an unopenable camera fails"
+! grep -q 'omarchy-faceauth-models' "$calls" || fail "setup installs no models when the daemon cannot open the camera" "$(cat "$calls")"
 ! grep -q $'systemctl\tenable' "$calls" || fail "setup enables no service when the daemon cannot open the camera" "$(cat "$calls")"
 grep -q 'cannot open the infrared camera' "$out" || fail "setup names the camera as the reason" "$(cat "$out")"
+grep -q 'The face models were not downloaded' "$out" || fail "setup says the models were not downloaded" "$(cat "$out")"
 [[ ! -e $pamd/omarchy-lock-face ]] || fail "setup writes no PAM service when the daemon cannot open the camera"
-pass "setup stops before enrolment when the daemon cannot open the camera"
+pass "setup stops before the models download and enrollment when the daemon cannot open the camera"
 
-# Enrolment fails: no PAM service.
+# A machine where an earlier setup stopped at the check keeps the daemon
+# package; once the check passes, setup adds only the models.
 rm -f "$pamd/omarchy-lock-face"
-run_script "$setup" present fail match && fail "setup with a failed enrolment fails"
-[[ ! -e $pamd/omarchy-lock-face ]] || fail "setup writes no PAM service when enrolment fails"
-pass "setup writes no PAM service when enrolment fails"
+TEST_PKG=daemon run_script "$setup" present ok match || fail "setup succeeds with only the daemon package installed" "$(cat "$out")"
+! grep -qx $'omarchy-pkg-add\tomarchy-faceauth' "$calls" || fail "setup does not install the daemon package again" "$(cat "$calls")"
+grep -qx $'omarchy-pkg-add\tomarchy-faceauth-models' "$calls" || fail "setup installs the models once the check passes" "$(cat "$calls")"
+rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
+pass "setup after a stopped run installs only the models"
 
-# Enrolment succeeds but the verification scan does not match: no PAM service.
+# Enrollment fails: no PAM service.
+rm -f "$pamd/omarchy-lock-face"
+run_script "$setup" present fail match && fail "setup with a failed enrollment fails"
+[[ ! -e $pamd/omarchy-lock-face ]] || fail "setup writes no PAM service when enrollment fails"
+pass "setup writes no PAM service when enrollment fails"
+
+# Enrollment succeeds but the verification scan does not match: no PAM service.
 rm -f "$pamd/omarchy-lock-face"
 run_script "$setup" present ok nomatch && fail "setup with a failed verification fails"
 [[ ! -e $pamd/omarchy-lock-face ]] || fail "setup writes no PAM service when verification fails"
 ! grep -q pam_faceauth "$pamd/sudo" || fail "setup leaves the sudo stack alone when verification fails"
-grep -q $'faceauth\tauth\t--user' "$calls" || fail "setup verifies the enrolment with a scan" "$(cat "$calls")"
+grep -q $'faceauth\tauth\t--user' "$calls" || fail "setup verifies the enrollment with a scan" "$(cat "$calls")"
 pass "setup writes no PAM service when the verification scan does not match"
 
-# The good path: install both packages, check the camera, enable, enrol,
-# verify, then the PAM service, closed by pam_deny. The models come with
-# their package, so nothing is fetched.
+# The good path: install the daemon package, check the camera, install the
+# models package, enable, enroll, verify, then the PAM services. The models
+# come with their package, so nothing is fetched.
 rm -f "$pamd/omarchy-lock-face"
-run_script "$setup" present ok match || fail "setup succeeds with a camera, an enrolment and a match" "$(cat "$calls")"
+run_script "$setup" present ok match || fail "setup succeeds with a camera, an enrollment and a match" "$(cat "$calls")"
 grep -q $'omarchy-bar\tput\tomarchy.faceauth.presence\t--before\tomarchy.power' "$calls" || fail "setup puts the walk-away widget on the bar after the match" "$(cat "$calls")"
-[[ -f $pamd/omarchy-lock-face ]] || fail "setup writes the lock-face PAM service"
-grep -q 'pam_faceauth.so' "$pamd/omarchy-lock-face" || fail "the lock-face service names the face module"
-grep -q 'pam_deny.so' "$pamd/omarchy-lock-face" || fail "the lock-face service is closed by pam_deny"
 enrol_line=$(grep -n $'faceauth\tenroll' "$calls" | head -1 | cut -d: -f1)
 tee_line=$(grep -n $'sudo\ttee' "$calls" | head -1 | cut -d: -f1)
-(( enrol_line < tee_line )) || fail "the PAM service is written only after enrolment" "$(cat "$calls")"
-grep -q $'omarchy-pkg-add\tomarchy-faceauth\tomarchy-faceauth-models' "$calls" || fail "setup installs the package and the models package in one call" "$(cat "$calls")"
+(( enrol_line < tee_line )) || fail "the PAM service is written only after enrollment" "$(cat "$calls")"
 ! grep -q $'models\tfetch' "$calls" || fail "setup fetches no models; the models package ships them" "$(cat "$calls")"
+add_line=$(grep -nx $'omarchy-pkg-add\tomarchy-faceauth' "$calls" | head -1 | cut -d: -f1)
 doctor_line=$(grep -n $'faceauth\tdoctor' "$calls" | head -1 | cut -d: -f1)
+models_line=$(grep -nx $'omarchy-pkg-add\tomarchy-faceauth-models' "$calls" | head -1 | cut -d: -f1)
 enable_line=$(grep -n $'systemctl\tenable' "$calls" | head -1 | cut -d: -f1)
-add_line=$(grep -n 'omarchy-pkg-add' "$calls" | head -1 | cut -d: -f1)
-(( add_line < doctor_line && doctor_line < enable_line )) || fail "doctor runs after the install and before the service is enabled" "$(cat "$calls")"
-grep -q 'pam_faceauth.so socket=/run/faceauth/sock consent' "$pamd/sudo" || fail "setup puts a consent line on the sudo stack" "$(cat "$pamd/sudo")"
-grep -q '^auth      sufficient pam_faceauth.so' "$pamd/sudo" || fail "the sudo consent line is sufficient: a shake falls to the terminal prompt" "$(cat "$pamd/sudo")"
-[[ $(head -1 "$pamd/sudo") == *pam_faceauth.so* ]] || fail "the consent line is the first line of the sudo stack"
-(( $(grep -c . "$pamd/sudo") == 2 )) || fail "setup adds one line to the sudo stack and nothing else" "$(cat "$pamd/sudo")"
+[[ -n $add_line && -n $models_line ]] || fail "setup installs the daemon package and the models package in separate calls" "$(cat "$calls")"
+(( add_line < doctor_line && doctor_line < models_line && models_line < enable_line )) || fail "doctor runs after the daemon install, the models install after doctor, and both before the service is enabled" "$(cat "$calls")"
+# Each PAM file is pinned line for line, so a stack that also lets anyone in
+# (a pam_permit line, a changed control) fails here rather than passing a grep.
+lock_face_expected='#%PAM-1.0
+auth       sufficient                  pam_faceauth.so socket=/run/faceauth/sock timeout=8
+auth       required                    pam_deny.so
+account    include                     system-local-login'
+[[ $(cat "$pamd/omarchy-lock-face") == "$lock_face_expected" ]] || fail "the lock-face service is the face line closed by pam_deny, and nothing else" "$(cat "$pamd/omarchy-lock-face")"
+# The sudo consent line is first and sufficient, so a shake falls to the
+# terminal prompt; setup adds that one line and nothing else.
+sudo_expected='auth      sufficient pam_faceauth.so socket=/run/faceauth/sock consent
+auth include system-auth'
+[[ $(cat "$pamd/sudo") == "$sudo_expected" ]] || fail "setup puts one consent line at the top of the sudo stack and nothing else" "$(cat "$pamd/sudo")"
 ! grep -q 'pre-face' "$calls" || fail "setup keeps no backup of the stacks it changes" "$(cat "$calls")"
 [[ -z $(ls -A "$backups" | grep -v polkit-1.created-by-faceauth) ]] || fail "the marker is the only file setup keeps outside /etc/pam.d" "$(ls -A "$backups")"
 [[ -f $pamd/polkit-1 && -f $backups/polkit-1.created-by-faceauth ]] || fail "setup creates polkit-1 when absent and remembers that it did"
-grep -q 'pam_faceauth.so' "$pamd/polkit-1" || fail "the created polkit-1 carries the consent line"
-grep -q '^auth      \[success=done auth_err=die default=ignore\] pam_faceauth.so' "$pamd/polkit-1" || fail "the polkit consent line ends the stack on the user's no so the agent can cancel" "$(cat "$pamd/polkit-1")"
+# The created polkit-1 ends the stack on the user's no, so the agent can
+# cancel, and otherwise carries the vendor stack.
+polkit_expected='#%PAM-1.0
+auth      [success=done auth_err=die default=ignore] pam_faceauth.so socket=/run/faceauth/sock consent
+auth       include      system-auth
+account    include      system-auth
+password   include      system-auth
+session    include      system-auth'
+[[ $(cat "$pamd/polkit-1") == "$polkit_expected" ]] || fail "the created polkit-1 is the consent line over the vendor stack, and nothing else" "$(cat "$pamd/polkit-1")"
 # The walk-through records the gestures after the looks, in the same run
-# as the enrolment; setup no longer makes a separate calibration call.
-grep -q $'faceauth\tenroll.*--guided' "$calls" || fail "setup enrols through the walk-through, which records the person's gestures" "$(cat "$calls")"
+# as the enrollment; setup no longer makes a separate calibration call.
+grep -q $'faceauth\tenroll.*--guided' "$calls" || fail "setup enrolls through the walk-through, which records the person's gestures" "$(cat "$calls")"
 grep -q $'faceauth\tcalibrate' "$calls" && fail "setup makes no separate calibration call" "$(cat "$calls")"
-pass "setup installs, enrols, verifies, and only then writes the lock-face PAM service"
+pass "setup installs, enrolls, verifies, and only then writes the lock-face PAM service"
 
-# Never under sudo: the enrolment would be root's. EUID is read-only in
+# Setup writes FaceAuth's own lines, byte for byte: the sudo and polkit-1
+# lines and the omarchy-lock-face block of packaging/pam-example.txt in the
+# omarchy-faceauth source. That file ships in neither this repo nor the
+# package, so its lines are pinned here from it; a change on either side has
+# to be made on both.
+pam_example_sudo='auth      sufficient pam_faceauth.so socket=/run/faceauth/sock consent'
+pam_example_polkit='auth      [success=done auth_err=die default=ignore] pam_faceauth.so socket=/run/faceauth/sock consent'
+pam_example_lock_face='auth       sufficient                  pam_faceauth.so socket=/run/faceauth/sock timeout=8
+auth       required                    pam_deny.so
+account    include                     system-local-login'
+(( $(grep -cxF "$pam_example_sudo" "$pamd/sudo") == 1 )) || fail "setup's sudo line is the example's" "$(cat "$pamd/sudo")"
+(( $(grep -cxF "$pam_example_polkit" "$pamd/polkit-1") == 1 )) || fail "setup's polkit-1 line is the example's" "$(cat "$pamd/polkit-1")"
+[[ $(sed 1d "$pamd/omarchy-lock-face") == "$pam_example_lock_face" ]] || fail "setup's lock-face service is the example's block" "$(cat "$pamd/omarchy-lock-face")"
+pass "setup writes the sudo, polkit-1 and lock-face lines of FaceAuth's pam-example"
+
+# Never under sudo: the enrollment would be root's. EUID is read-only in
 # bash, so the guard is asserted on the source.
 grep -q '(( EUID == 0 ))' "$setup" || fail "setup refuses to run as root"
 grep -q '(( EUID == 0 ))' "$remove" || fail "removal refuses to run as root"
@@ -352,7 +409,7 @@ rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
 printf 'auth      [success=1 default=ignore] pam_exec.so quiet /usr/bin/omarchy-hw-laptop-closed\nauth      sufficient pam_fprintd.so\nauth include system-auth\n' >"$pamd/sudo"
 keep_pam=1 run_script "$setup" present ok match || fail "setup succeeds on a stack with a fingerprint line" "$(cat "$calls")"
 [[ $(sed -n 1p "$pamd/sudo") == *omarchy-hw-laptop-closed* && $(sed -n 2p "$pamd/sudo") == *pam_fprintd.so* ]] || fail "the fingerprint gate and line keep their places" "$(cat "$pamd/sudo")"
-[[ $(sed -n 3p "$pamd/sudo") == "$(grep -m1 '^face_line=' "$setup" | sed "s/^face_line='//; s/'\$//")" ]] || fail "the face line goes right after the fingerprint line" "$(cat "$pamd/sudo")"
+[[ $(sed -n 3p "$pamd/sudo") == "${sudo_expected%%$'\n'*}" ]] || fail "the face line goes right after the fingerprint line" "$(cat "$pamd/sudo")"
 [[ $(sed -n 4p "$pamd/sudo") == "auth include system-auth" ]] && (( $(grep -c . "$pamd/sudo") == 4 )) || fail "nothing else moves" "$(cat "$pamd/sudo")"
 printf 'auth sufficient pam_u2f.so cue\nauth include system-auth\n' >"$pamd/sudo"
 keep_pam=1 run_script "$setup" present ok match || fail "setup succeeds on a stack with a FIDO2 line" "$(cat "$calls")"
@@ -370,7 +427,7 @@ grep -q 'Replacing a face line in sudo' "$out" || fail "setup says it replaced t
 keep_pam=1 run_script "$setup" present ok match || fail "setup succeeds again on its own line" "$(cat "$calls")"
 grep -q 'sudo is already configured' "$out" || fail "an exact match reads as already configured" "$(cat "$out")"
 (( $(grep -c pam_faceauth.so "$pamd/sudo") == 1 )) || fail "a re-run adds no second line" "$(cat "$pamd/sudo")"
-pass "setup replaces a face line it did not write and recognises only its own"
+pass "setup replaces a face line it did not write and recognizes only its own"
 
 # A polkit-1 that setup created is deleted only while it is still exactly what
 # setup wrote. omarchy-setup-security-fingerprint inserts pam_fprintd.so into
@@ -399,10 +456,21 @@ keep_pam=1 run_script "$remove" present ok match || fail "removal succeeds with 
 ! grep -q pam_faceauth "$pamd/polkit-1" || fail "our line still goes with an empty marker" "$(cat "$pamd/polkit-1")"
 pass "an empty marker from an older setup strips the face line instead of deleting the file"
 
+# A polkit-1 that setup found gets the example's polkit-1 line, the same one a
+# created file carries, and no marker: the file stays someone else's.
+rm -rf "$backups"; mkdir -p "$backups"
+printf '#%%PAM-1.0\nauth       include      system-auth\naccount    include      system-auth\n' >"$pamd/polkit-1"
+run_script "$setup" present ok match || fail "setup succeeds on a polkit-1 it found" "$(cat "$out")"
+(( $(grep -cxF "$pam_example_polkit" "$pamd/polkit-1") == 1 )) || fail "setup puts the example's polkit-1 line into a stack it found" "$(cat "$pamd/polkit-1")"
+(( $(grep -c . "$pamd/polkit-1") == 4 )) || fail "setup adds that one line and nothing else" "$(cat "$pamd/polkit-1")"
+[[ ! -e $backups/polkit-1.created-by-faceauth ]] || fail "setup claims no polkit-1 it found"
+rm -f "$pamd/polkit-1"
+pass "setup puts the example's polkit-1 line into a polkit-1 it found, and claims no file"
+
 # With the daemon stopped, the templates cannot go through it, so removal
 # deletes the files itself: the template, sealed or plaintext (a machine
 # without a TPM keeps <user>.json), and the blobs set aside as unreadable,
-# this user's only. A neighbour whose name extends or hyphenates this one
+# this user's only. A neighbor whose name extends or hyphenates this one
 # keeps everything.
 seed_store() {
   rm -rf "$store"; mkdir -p "$store/gestures"
@@ -451,10 +519,10 @@ TEST_ACTIVE=no run_script "$remove" present ok match --keep-templates || fail "r
 [[ -e $store/$USER.cred ]] || fail "--keep-templates keeps the template with the daemon stopped"
 pass "--keep-templates keeps the template files with the daemon stopped"
 
-# After enrolment and verification setup asks for both obscured face lock
+# After enrollment and verification setup asks for both obscured face lock
 # times, the shipped ones selected, and saves them with `presence
 # obscured-lock`, which never switches the walk-away lock. Without a
-# terminal, or with a question cancelled, it saves nothing and says the
+# terminal, or with a question canceled, it saves nothing and says the
 # times stay as they are.
 rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
 run_script "$setup" present ok match || fail "setup without a terminal succeeds" "$(cat "$out")"
@@ -468,13 +536,13 @@ grep -q $'^sudo\tfaceauth\tpresence\tobscured-lock\t--default\t10\t--secure\t5$'
 ! grep -q $'presence\ton\|presence\toff' "$calls" || fail "saving the times never switches the walk-away lock" "$(cat "$calls")"
 auth_line=$(grep -n $'^faceauth\tauth' "$calls" | head -1 | cut -d: -f1)
 save_line=$(grep -n $'^sudo\tfaceauth\tpresence\tobscured-lock' "$calls" | head -1 | cut -d: -f1)
-(( auth_line < save_line )) || fail "the times are asked for only after a verified enrolment" "$(cat "$calls")"
+(( auth_line < save_line )) || fail "the times are asked for only after a verified enrollment" "$(cat "$calls")"
 grep -q 'Obscured face lock time saved: 10 minutes in default mode, 5 minutes in secure mode' "$out" || fail "setup says what it saved" "$(cat "$out")"
 rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
-run_setup_tty cancel || fail "setup succeeds when the question is cancelled" "$(cat "$out")"
-grep -q $'^gum\tchoose' "$calls" || fail "the cancelled run was asked" "$(cat "$calls")"
-! grep -q 'obscured-lock' "$calls" || fail "a cancelled question saves nothing" "$(cat "$calls")"
-grep -q 'Obscured face lock time left as it was' "$out" || fail "a cancelled question says the times stay" "$(cat "$out")"
+run_setup_tty cancel || fail "setup succeeds when the question is canceled" "$(cat "$out")"
+grep -q $'^gum\tchoose' "$calls" || fail "the canceled run was asked" "$(cat "$calls")"
+! grep -q 'obscured-lock' "$calls" || fail "a canceled question saves nothing" "$(cat "$calls")"
+grep -q 'Obscured face lock time left as it was' "$out" || fail "a canceled question says the times stay" "$(cat "$out")"
 pass "setup asks for the obscured face lock times with a terminal, saves them without switching the lock, and keeps them otherwise"
 
 # Setup closes with where the walk-away controls live: the bar icon, the
@@ -487,29 +555,87 @@ printf '#!/bin/bash\necho "/dev/hidraw3: vendor=0x1050, product=0x0407 (Yubico Y
 chmod +x "$hw_bin"/*
 rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
 PATH="$hw_bin:$PATH" run_script "$setup" present ok match || fail "setup succeeds for the closing note" "$(cat "$out")"
-grep -q 'under Setup > Security > Face > Walk-Away Lock' "$out" || fail "the note says where the walk-away and obscured face lock times change" "$(cat "$out")"
+grep -q 'Walk-away lock: enable it, and change its away times and obscured face lock times, under Setup > Security > Face > Walk-Away Lock (Enable, Away Time, Obscured Face)' "$out" || fail "the note says where the walk-away lock is enabled and its times change" "$(cat "$out")"
+! grep -q $'presence\ton\|presence\taway-time' "$calls" || fail "setup never enables the walk-away lock or sets an away time by itself" "$(cat "$calls")"
 grep -q 'its icon sits in the top bar: a left click switches between default and secure mode, a right click lists the modes, and Super + Ctrl + Shift + L switches them from the keyboard' "$out" || fail "the note explains the bar icon and the chord" "$(cat "$out")"
 ! sed -n '/^Walk-away lock:/,$p' "$out" | grep -qi 'two-factor\|mfa\|fingerprint\|security key\|fido' || fail "the note never mentions two-factor mode or second-factor hardware, whatever is present" "$(cat "$out")"
 rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
 run_script "$setup" present ok nomatch && fail "a failed verification still fails"
 ! grep -q 'Walk-away lock:' "$out" || fail "a failed setup prints no closing note" "$(cat "$out")"
-pass "setup closes with the walk-away controls, and only after a verified enrolment"
+pass "setup closes with the walk-away controls, and only after a verified enrollment"
 
-# Tune Gestures and the Walk-Away rows in the menu run the setup command
-# with a flag, so the menu file names no sudo: the command's own root guard
-# and requires-sudo header cover them, as omarchy-sudo-passwordless does.
-# The flags run the one faceauth call and nothing else of setup.
+# Tune Gestures and the Walk-Away Lock rows in the menu run the setup
+# command with a flag, so the menu file names no sudo: the command's own root
+# guard and requires-sudo header cover them, as omarchy-sudo-passwordless
+# does. Each flag runs its one faceauth call and nothing else of setup.
+# Enable and Disable are `--walk-away on|off`, which switch the watch and
+# keep the saved away times.
 run_script "$setup" present ok match --gestures || fail "setup --gestures succeeds" "$(cat "$out")"
 [[ $(cat "$calls") == $'sudo\tfaceauth\tcalibrate\t--user\t'"$USER"$'\t--guided\nfaceauth\tcalibrate\t--user\t'"$USER"$'\t--guided' ]] || fail "--gestures runs the guided calibration for the user and nothing else" "$(cat "$calls")"
-run_script "$setup" present ok match --walk-away 30 || fail "setup --walk-away 30 succeeds" "$(cat "$out")"
-grep -q $'^sudo\tfaceauth\tpresence\ton\t--user\t'"$USER"$'\t--away-seconds\t30$' "$calls" || fail "--walk-away 30 turns the watch on at 30 seconds" "$(cat "$calls")"
-! grep -q 'omarchy-pkg-add\|tee' "$calls" || fail "--walk-away runs nothing else of setup" "$(cat "$calls")"
-run_script "$setup" present ok match --walk-away off || fail "setup --walk-away off succeeds" "$(cat "$out")"
-grep -q $'^sudo\tfaceauth\tpresence\toff\t--user\t'"$USER"'$' "$calls" || fail "--walk-away off turns the watch off" "$(cat "$calls")"
-run_script "$setup" present ok match --walk-away 45 && fail "an away time the menu does not offer is refused"
-[[ ! -s $calls ]] || fail "a refused flag runs nothing" "$(cat "$calls")"
+for v in on off; do
+  run_script "$setup" present ok match --walk-away "$v" || fail "setup --walk-away $v succeeds" "$(cat "$out")"
+  [[ $(cat "$calls") == $'sudo\tfaceauth\tpresence\t'"$v"$'\t--user\t'"$USER"$'\nfaceauth\tpresence\t'"$v"$'\t--user\t'"$USER" ]] || fail "--walk-away $v switches the watch $v for the user and nothing else" "$(cat "$calls")"
+done
 run_script "$setup" present ok match --bogus && fail "an unknown flag is refused"
-pass "the menu's gesture and walk-away rows run through the setup command"
+[[ ! -s $calls ]] || fail "an unknown flag runs nothing" "$(cat "$calls")"
+pass "the menu's gesture, Enable and Disable rows run through the setup command"
+
+# Add Look is `--add [label]`: one enrollment under a label cut to letters,
+# digits, - and _, with no leading dash so faceauth cannot read it as an
+# option, opened at the distance step, and nothing else of setup.
+# It never writes a PAM file. Without the package face authentication is not
+# set up; a stopped service is said as such.
+add_expect() { printf 'systemctl\tis-active\t--quiet\tfaceauth.service\nsudo\tfaceauth\tenroll\t--user\t%s\t--label\t%s\t--guided\t--start\tdistance\nfaceauth\tenroll\t--user\t%s\t--label\t%s\t--guided\t--start\tdistance' "$USER" "$1" "$USER" "$1"; }
+rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1" "$pamd/omarchy-lock-face"
+TEST_PKG=present run_script "$setup" present ok match --add 'my glasses!; rm -rf ~' || fail "setup --add succeeds" "$(cat "$out")"
+[[ $(cat "$calls") == "$(add_expect myglassesrm-rf)" ]] || fail "--add enrolls under the sanitized label from the distance step and runs nothing else" "$(cat "$calls")"
+[[ $(cat "$pamd/sudo") == "auth include system-auth" && ! -e $pamd/polkit-1 && ! -e $pamd/omarchy-lock-face ]] || fail "--add writes no PAM file" "$(ls -A "$pamd")"
+[[ -z $(ls -A "$backups") ]] || fail "--add keeps no marker" "$(ls -A "$backups")"
+TEST_PKG=present run_script "$setup" present ok match --add '!!!' || fail "setup --add with a label of symbols succeeds" "$(cat "$out")"
+[[ $(cat "$calls") == "$(add_expect extra)" ]] || fail "a label with nothing left after sanitizing becomes extra" "$(cat "$calls")"
+TEST_PKG=present run_script "$setup" present ok match --add -h || fail "setup --add -h succeeds" "$(cat "$out")"
+[[ $(cat "$calls") == "$(add_expect h)" ]] || fail "a label of -h loses its dash and never reaches faceauth as an option" "$(cat "$calls")"
+TEST_PKG=present run_script "$setup" present ok match --add --x || fail "setup --add --x succeeds" "$(cat "$out")"
+[[ $(cat "$calls") == "$(add_expect x)" ]] || fail "a label of --x loses both dashes" "$(cat "$calls")"
+TEST_PKG=present run_script "$setup" present ok match --add --- || fail "setup --add --- succeeds" "$(cat "$out")"
+[[ $(cat "$calls") == "$(add_expect extra)" ]] || fail "a label of dashes only becomes extra" "$(cat "$calls")"
+rm -f "$calls.gum"
+TEST_PKG=present TEST_GUM='lamp light' run_script "$setup" present ok match --add || fail "setup --add without a label asks for one" "$(cat "$out")"
+grep -q $'^gum\tinput' "$calls" && grep -q $'\t--label\tlamplight\t' "$calls" || fail "a label asked for is sanitized too" "$(cat "$calls")"
+TEST_PKG=present run_script "$setup" present ok match --add && fail "a canceled label question fails"
+! grep -q $'faceauth\tenroll' "$calls" || fail "a canceled label question enrolls nothing" "$(cat "$calls")"
+TEST_PKG=present run_script "$setup" present fail match --add glasses && fail "a failed --add enrollment fails"
+grep -q 'Enrollment failed' "$out" || fail "a failed --add enrollment says so" "$(cat "$out")"
+run_script "$setup" present ok match --add glasses && fail "--add without the package fails"
+grep -q 'not set up yet' "$out" && [[ ! -s $calls ]] || fail "--add without the package says face authentication is not set up and runs nothing" "$(cat "$out")"
+TEST_PKG=present TEST_ACTIVE=no run_script "$setup" present ok match --add glasses && fail "--add with the service stopped fails"
+grep -q 'service is not running' "$out" && ! grep -q 'not set up' "$out" || fail "a stopped service is said as stopped, not as not set up" "$(cat "$out")"
+! grep -q $'faceauth\tenroll' "$calls" || fail "--add with the service stopped enrolls nothing" "$(cat "$calls")"
+TEST_PKG=present run_script "$setup" present ok match --add glasses beard && fail "--add with two labels is refused"
+[[ ! -s $calls ]] || fail "--add with two labels runs nothing" "$(cat "$calls")"
+[[ $(cat "$pamd/sudo") == "auth include system-auth" && ! -e $pamd/polkit-1 && ! -e $pamd/omarchy-lock-face ]] || fail "no --add case writes a PAM file" "$(ls -A "$pamd")"
+pass "setup --add enrolls another look under a sanitized label and writes no PAM file"
+
+# The away time flags save one mode's away time each through `presence
+# away-time` and take only the menu's values: never, 20, 30 or 60 seconds in
+# default mode, and 20, 30 or 60 in secure mode, where an empty chair always
+# locks. They never run `presence on` or `off`, so the walk-away lock stays
+# as it was. The old `--walk-away 20|30|60`, which also turned the watch on,
+# is refused.
+for v in never 20 30 60; do
+  run_script "$setup" present ok match --away-time "$v" || fail "setup --away-time $v succeeds" "$(cat "$out")"
+  [[ $(cat "$calls") == $'sudo\tfaceauth\tpresence\taway-time\t--default\t'"$v"$'\nfaceauth\tpresence\taway-time\t--default\t'"$v" ]] || fail "--away-time $v saves the default-mode away time and nothing else" "$(cat "$calls")"
+done
+for v in 20 30 60; do
+  run_script "$setup" present ok match --secure-away-time "$v" || fail "setup --secure-away-time $v succeeds" "$(cat "$out")"
+  [[ $(cat "$calls") == $'sudo\tfaceauth\tpresence\taway-time\t--secure\t'"$v"$'\nfaceauth\tpresence\taway-time\t--secure\t'"$v" ]] || fail "--secure-away-time $v saves the secure-mode away time and nothing else" "$(cat "$calls")"
+done
+for bad in "--walk-away 20" "--walk-away 30" "--walk-away 60" "--walk-away 45" "--walk-away never" "--walk-away enable" "--walk-away" "--walk-away on off" "--away-time 45" "--away-time 200" "--away-time 0" "--away-time none" "--away-time" "--away-time 20 30" "--secure-away-time never" "--secure-away-time 45" "--secure-away-time 0" "--secure-away-time" "--secure-away-time 20 30"; do
+  read -ra bad_args <<<"$bad"
+  run_script "$setup" present ok match "${bad_args[@]}" && fail "setup $bad is refused"
+  [[ ! -s $calls ]] || fail "setup $bad runs nothing" "$(cat "$calls")"
+done
+pass "the away time flags take exactly the menu's choices and save one time each"
 
 # The obscured face lock flags save one mode's time each through `presence
 # obscured-lock` and take only the menu's values. They never run `presence
@@ -533,36 +659,98 @@ menu="$ROOT/default/omarchy/omarchy-menu.jsonc"
 face_rows=$(grep -E '^\s*"(setup|remove)\.security\.face' "$menu")
 [[ -n $face_rows ]] || fail "the menu carries the face rows"
 ! grep -q 'sudo' <<<"$face_rows" || fail "no face menu row runs sudo itself" "$face_rows"
-! grep -q '"icon":""' <<<"$face_rows" || fail "every face menu row has an icon" "$face_rows"
+while read -r row; do
+  [[ $row =~ \"icon\":\"[^\"]+\" ]] || fail "every face menu row has an icon" "$row"
+done <<<"$face_rows"
 while read -r label; do
   (( ${#label} <= 16 )) || fail "face menu labels fit the menu with a check mark: $label"
 done < <(grep -o '"label":"[^"]*"' <<<"$face_rows" | sed 's/"label":"//; s/"$//')
+grep -q '"setup.security.face.add".*omarchy-setup-security-face --add' <<<"$face_rows" || fail "Add Look runs setup --add" "$face_rows"
 grep -q '"setup.security.face.gestures".*omarchy-setup-security-face --gestures' <<<"$face_rows" || fail "Tune Gestures runs setup --gestures" "$face_rows"
-for v in off 20 30 60; do
-  grep -q "\"setup.security.face.lock.$v\".*omarchy-setup-security-face --walk-away $v" <<<"$face_rows" || fail "the Walk-Away $v row runs setup --walk-away $v" "$face_rows"
-  grep -q "\"setup.security.face.lock.$v\".*\"checked\"" <<<"$face_rows" || fail "the Walk-Away $v row marks itself when it is the current choice" "$face_rows"
+# Walk-Away Lock is a switch and two panels: Enable while the watch is off,
+# and Disable, Away Time and Obscured Face while it is on. The rows hide with
+# `when` on the daemon's config; none of them is a choice already made, so
+# none is dimmed or checked. The old Off and time rows are gone.
+! grep -qE '"setup\.security\.face\.lock\.(off|20|30|60)":' "$menu" || fail "the old Off and time rows are gone" "$(grep 'face.lock' "$menu")"
+[[ $(grep -oE '"setup\.security\.face\.lock\.[a-z0-9]+":' "$menu" | tr -d '":' | sed 's/.*\.//' | tr '\n' ' ') == "enable disable away obscured " ]] || fail "Walk-Away Lock holds Enable, Disable, Away Time and Obscured Face, in that order" "$(grep 'face.lock' "$menu")"
+[[ $(grep '"setup.security.face.lock.enable":' "$menu") == *'"label":"Enable",'*"omarchy-setup-security-face --walk-away on'"* ]] || fail "Enable runs setup --walk-away on"
+[[ $(grep '"setup.security.face.lock.disable":' "$menu") == *'"label":"Disable",'*"omarchy-setup-security-face --walk-away off'"* ]] || fail "Disable runs setup --walk-away off"
+for id in enable disable away obscured; do
+  row=$(grep "\"setup.security.face.lock.$id\":" "$menu")
+  [[ $row == *'"when":"'* ]] || fail "the $id row hides by the watch's state" "$row"
+  [[ $row != *'"checked"'* && $row != *'"disabled"'* ]] || fail "the $id row is shown or hidden, never checked or dimmed" "$row"
 done
-# The checked guards read the daemon's config, which presence on|off rewrites
-# with enabled and a float away time; each guard runs as a bash condition.
+# The guards read the daemon's config, which presence on|off rewrites with
+# enabled; each runs as a bash condition against a scratch copy.
 conf="$test_tmp/config.toml"
-guard_of() { grep "\"setup.security.face.lock.$1\"" "$menu" | sed 's/.*"checked":"\(.*\)","action".*/\1/' | sed 's/\\"/"/g; s/\\\\/\\/g' | sed "s|/etc/faceauth/config.toml|$conf|g"; }
+when_of() { grep "\"setup.security.face.lock.$1\":" "$menu" | sed 's/.*"when":"\([^"]*\)".*/\1/' | sed "s|/etc/faceauth/config.toml|$conf|g"; }
+shown_rows() {
+  local id rows=()
+  for id in enable disable away obscured; do
+    bash -c "$(when_of "$id")" && rows+=("$id")
+  done
+  echo "${rows[*]}"
+}
 printf '[presence]\nenabled = true\nuser = "%s"\naway_seconds = 30.0\n' "$USER" >"$conf"
-bash -c "$(guard_of 30)" || fail "the 30 row is checked when the watch is on at 30 seconds" "$(guard_of 30)"
-bash -c "$(guard_of 20)" && fail "the 20 row is not checked at 30 seconds"
-bash -c "$(guard_of off)" && fail "the Off row is not checked while the watch is on"
+[[ $(shown_rows) == "disable away obscured" ]] || fail "with the watch on, Disable, Away Time and Obscured Face show" "$(shown_rows)"
 printf '[presence]\nenabled = false\nuser = "%s"\naway_seconds = 30.0\n' "$USER" >"$conf"
-bash -c "$(guard_of off)" || fail "the Off row is checked while the watch is off" "$(guard_of off)"
-bash -c "$(guard_of 30)" && fail "no time row is checked while the watch is off"
+[[ $(shown_rows) == "enable" ]] || fail "with the watch off, only Enable shows" "$(shown_rows)"
+printf '[presence]\n# enabled = true\nuser = "%s"\n' "$USER" >"$conf"
+[[ $(shown_rows) == "enable" ]] || fail "a commented-out enabled line reads as off" "$(shown_rows)"
 rm -f "$conf"
-bash -c "$(guard_of off)" || fail "with no config at all the Off row is checked" "$(guard_of off)"
-pass "the Walk-Away rows show the current choice from the daemon's config"
+[[ $(shown_rows) == "enable" ]] || fail "with no config at all, only Enable shows" "$(shown_rows)"
+pass "Walk-Away Lock shows Enable while the watch is off, and Disable, Away Time and Obscured Face while it is on"
+
+# Away Time opens one panel per mode, each titled with its mode, with one
+# sentence of help as its search description. Default mode offers Never and
+# 20, 30 and 60 seconds; secure mode offers 20, 30 and 60 seconds and no
+# Never, since an empty chair always locks there. Every time row runs setup
+# with its value and marks itself from the daemon's config, with the shipped
+# 20 seconds checked while the key is unset.
+guard_of() { grep "\"setup.security.face.lock.$1\"" "$menu" | sed 's/.*"checked":"\(.*\)","action".*/\1/' | sed 's/\\"/"/g; s/\\\\/\\/g' | sed "s|/etc/faceauth/config.toml|$conf|g"; }
+away=$(grep '"setup.security.face.lock.away":' "$menu")
+[[ $away == *'"label":"Away Time","title":"Away time","description":"How long the chair stays empty before the session locks, in default mode and in secure mode."'* ]] || fail "Away Time opens a panel titled Away time that says what the time is for" "$away"
+[[ $(grep '"setup.security.face.lock.away.default":' "$menu") == *'"label":"Default mode","title":"Away, default mode","description":"How long the chair stays empty before the session locks in default mode."'* ]] || fail "the default-mode away panel is named for its mode"
+[[ $(grep '"setup.security.face.lock.away.secure":' "$menu") == *'"label":"Secure mode","title":"Away, secure mode","description":"How long the chair stays empty before the session locks in secure mode, where an empty chair always locks."'* ]] || fail "the secure-mode away panel is named for its mode and says an empty chair always locks there"
+(( $(grep -cE '"setup\.security\.face\.lock\.away\.[a-z]+":' "$menu") == 2 )) || fail "Away Time holds exactly the two mode panels" "$(grep 'lock.away' "$menu")"
+[[ $(grep '"setup.security.face.lock.away.default.never":' "$menu") == *'"label":"Never","description":"Default mode never locks the session, even with the chair empty; only secure mode does."'* ]] || fail "the Never row says what never means"
+for v in never 20 30 60; do
+  grep -q "\"setup.security.face.lock.away.default.$v\".*\"checked\".*omarchy-setup-security-face --away-time $v'" <<<"$face_rows" || fail "the default-mode $v row runs setup --away-time $v and marks itself" "$face_rows"
+done
+for v in 20 30 60; do
+  grep -q "\"setup.security.face.lock.away.secure.$v\".*\"checked\".*omarchy-setup-security-face --secure-away-time $v'" <<<"$face_rows" || fail "the secure-mode $v row runs setup --secure-away-time $v and marks itself" "$face_rows"
+done
+(( $(grep -c '"setup.security.face.lock.away.default\.' <<<"$face_rows") == 4 && $(grep -c '"setup.security.face.lock.away.secure\.' <<<"$face_rows") == 3 )) || fail "the away panels offer exactly the menu's choices" "$face_rows"
+away_rows() {
+  local id rows=()
+  for id in default.never default.20 default.30 default.60 secure.20 secure.30 secure.60; do
+    bash -c "$(guard_of "away.$id")" && rows+=("$id")
+  done
+  echo "${rows[*]}"
+}
+printf '[presence]\nenabled = true\nuser = "%s"\n' "$USER" >"$conf"
+[[ $(away_rows) == "default.20 secure.20" ]] || fail "with no away time set the shipped 20 seconds are checked in each mode" "$(away_rows)"
+printf '[presence]\nenabled = true\nuser = "%s"\naway_seconds = 20.0\nsecure_away_seconds = 20.0\n' "$USER" >"$conf"
+[[ $(away_rows) == "default.20 secure.20" ]] || fail "the written shipped values read the same" "$(away_rows)"
+printf '[presence]\nenabled = true\nuser = "%s"\naway_seconds = 30.0\nsecure_away_seconds = 60.0\n' "$USER" >"$conf"
+[[ $(away_rows) == "default.30 secure.60" ]] || fail "30 and 60 seconds are checked in their modes and nothing else" "$(away_rows)"
+printf '[presence]\nenabled = true\nuser = "%s"\naway_seconds = "never"\nsecure_away_seconds = 30.0\n' "$USER" >"$conf"
+[[ $(away_rows) == "default.never secure.30" ]] || fail "never is checked instead of the shipped 20 seconds" "$(away_rows)"
+printf '[presence]\nenabled = true\nuser = "%s"\naway_seconds = 200.0\nsecure_away_seconds = 200\n' "$USER" >"$conf"
+[[ -z $(away_rows) ]] || fail "200 seconds checks no row, not the 20 row it starts with" "$(away_rows)"
+printf '[presence]\nenabled = true\nuser = "%s"\naway_seconds = 20.5\nsecure_away_seconds = 60\n' "$USER" >"$conf"
+[[ $(away_rows) == "secure.60" ]] || fail "20.5 seconds checks no default row, and a whole 60 checks the secure one" "$(away_rows)"
+printf '[presence]\nenabled = true\nuser = "%s"\nsecure_away_seconds = 30.0\n' "$USER" >"$conf"
+[[ $(away_rows) == "default.20 secure.30" ]] || fail "the secure away time is not read as the default one" "$(away_rows)"
+rm -f "$conf"
+[[ $(away_rows) == "default.20 secure.20" ]] || fail "with no config at all the shipped 20 seconds are checked" "$(away_rows)"
+pass "Away Time opens a panel per mode, runs through setup and shows the current time from the daemon's config"
 
 # The obscured face lock time is one Obscured Face row under Walk-Away Lock,
-# titled with the full name, opening one panel per mode. It always shows:
-# saving a time never switches the walk-away lock on, so the times can be
-# set while it is off. Each panel keeps one sentence of help as its search
-# description. Every time row runs setup with its value and marks itself
-# from the daemon's config.
+# titled with the full name, opening one panel per mode. It shows while the
+# walk-away lock is on, as Away Time does. Each panel keeps one sentence of
+# help as its search description. Every time row runs setup with its value
+# and marks itself from the daemon's config.
 obscured=$(grep '"setup.security.face.lock.obscured":' "$menu")
 [[ $obscured == *'"label":"Obscured Face","title":"Obscured face lock time"'* ]] || fail "one Obscured Face row opens a panel titled with the full name" "$obscured"
 (( $(grep -c '"setup.security.face.lock.[a-z-]*obscured[a-z-]*":' "$menu") == 1 )) || fail "Walk-Away Lock holds one obscured face row" "$(grep 'obscured' "$menu")"
@@ -571,7 +759,7 @@ obscured=$(grep '"setup.security.face.lock.obscured":' "$menu")
 (( $(grep -cE '"setup\.security\.face\.lock\.obscured\.[a-z]+":' "$menu") == 2 )) || fail "Obscured Face holds exactly the two mode panels" "$(grep 'obscured' "$menu")"
 for g in obscured obscured.default obscured.secure; do
   group=$(grep "\"setup.security.face.lock.$g\":" "$menu")
-  [[ -n $group && $group != *'"when"'* ]] || fail "the $g panel shows whether or not the walk-away lock is on" "$group"
+  [[ -n $group ]] || fail "the $g panel is in the menu"
   [[ $group == *'"description":"How long a partly covered or turned-away face keeps the session open '* ]] || fail "the $g panel says what the time is for" "$group"
 done
 [[ $obscured == *'in default mode and in secure mode.'* ]] || fail "the Obscured Face description names both modes" "$obscured"
@@ -600,7 +788,7 @@ printf '[presence]\nenabled = true\nuser = "%s"\naway_seconds = 30.0\nobscured_f
 [[ $(checked_rows) == "default.1 secure.1" ]] || fail "1 minute is checked in each mode and nothing longer" "$(checked_rows)"
 rm -f "$conf"
 [[ $(checked_rows) == "default.never secure.2" ]] || fail "with no config at all the shipped choices are checked" "$(checked_rows)"
-pass "Obscured Face always shows, opens a panel per mode, runs through setup and shows the current time from the daemon's config"
+pass "Obscured Face opens a panel per mode, runs through setup and shows the current time from the daemon's config"
 
 # The IR camera lister reads sysfs, never a device node: it lists an ov7251
 # sensor only beside an ipu3-cio2 capture node, because that graph is the
@@ -631,7 +819,7 @@ listed=$(OMARCHY_V4L_SYSFS_PATH="$fake_sysfs" bash "$lister_list") && fail "the 
 OMARCHY_V4L_SYSFS_PATH="$fake_sysfs" PATH="$ROOT/bin:$PATH" bash "$lister" && fail "the guard is false without an ov7251"
 pass "the lister lists nothing on an IPU3 graph without an ov7251"
 
-# An IR sensor on another graph (IPU6, or a UVC module with a greyscale
+# An IR sensor on another graph (IPU6, or a UVC module with a grayscale
 # node): the daemon cannot drive it, so it is not listed.
 seed_sysfs video0="Intel IPU6 ISYS Capture 0" v4l-subdev0="Intel IPU6 CSI2 0" v4l-subdev1="ov7251 1-0060" video2="Integrated IR Camera: Integrated I"
 listed=$(OMARCHY_V4L_SYSFS_PATH="$fake_sysfs" bash "$lister_list") && fail "the lister exits 1 without an ipu3-cio2 graph"

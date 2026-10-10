@@ -7,7 +7,7 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 # The face consent window is opened by a root daemon for every sudo and polkit
 # request. These asserts hold the line on what it may show and how it answers:
 # the answer token travels on stdin, never argv; spawned binaries are absolute;
-# the card is two lines, what is asked and who asked, each labelled by whether
+# the card is two lines, what is asked and who asked, each labeled by whether
 # the daemon read it itself, with nothing cut or hidden; and the layer never
 # reaches a screen share.
 
@@ -41,12 +41,12 @@ assert(/root\.riderMinutes = Number\(payload\.passwordless_minutes \|\| 0\)/.tes
 assert(/root\.facePresent = payload\.face_present === true/.test(consent), 'open() reads the face from payload.face_present, true only when the daemon says so')
 assert(/var riderChanged = Number\(payload\.passwordless_minutes \|\| 0\) !== root\.riderMinutes/.test(consent), 'a payload that changes the rider is noticed')
 assert(/if \(token\.length > 0 && \(fresh \|\| riderChanged\)\) root\.answer\(\["--ack"\], ""\)/.test(consent), 'a changed rider is acknowledged afresh, so the daemon starts the dwell over')
-// The control is greyed and unclickable unless the enrolled face is on screen.
+// The control is grayed and unclickable unless the enrolled face is on screen.
 const plButton = consent.split(/\bButton \{/).slice(1).find(b => /faceConsent\.passwordlessFor/.test(b))
 assert(plButton, 'the card has the passwordless button')
 assert(/enabled: root\.passwordlessMinutes\.length > 0 && root\.facePresent/.test(plButton), 'the passwordless button is enabled only with minutes and the face in frame')
-assert(/opacity: root\.facePresent \? 1\.0 : 0\.4/.test(plButton), 'the passwordless button is greyed without the face')
-assert(/faceConsent\.passwordlessLook/.test(plButton) && /look at the camera/.test(enShell['faceConsent.passwordlessLook']), 'the greyed button says why')
+assert(/opacity: root\.facePresent \? 1\.0 : 0\.4/.test(plButton), 'the passwordless button is grayed without the face')
+assert(/faceConsent\.passwordlessLook/.test(plButton) && /look at the camera/.test(enShell['faceConsent.passwordlessLook']), 'the grayed button says why')
 const minutesBlock = consent.split(/\bTextField \{/).slice(1).find(b => /id: minutesField/.test(b)) || ''
 assert(/enabled: root\.facePresent/.test(minutesBlock), 'the minutes field is disabled without the face')
 // Upstream's warning, in its own words (bin/omarchy-sudo-passwordless).
@@ -61,8 +61,8 @@ assert(/visible: root\.sudoRequest && root\.pending/.test(consent), 'it shows on
 const rows = consent.split(/\n\s*Row \{/).slice(1)
 const plRow = rows.find(r => /id: passwordlessRow/.test(r)) || ''
 const answerRow = rows.find(r => /id: answerRow/.test(r)) || ''
-assert(/anchors\.left: parent\.left/.test(plRow) && /anchors\.verticalCenter: parent\.verticalCenter/.test(plRow), 'the passwordless controls sit on the left, centred on the line')
-assert(/anchors\.right: parent\.right/.test(answerRow) && /anchors\.verticalCenter: parent\.verticalCenter/.test(answerRow), 'the answer buttons sit on the right of the same line, centred')
+assert(/anchors\.left: parent\.left/.test(plRow) && /anchors\.verticalCenter: parent\.verticalCenter/.test(plRow), 'the passwordless controls sit on the left, centered on the line')
+assert(/anchors\.right: parent\.right/.test(answerRow) && /anchors\.verticalCenter: parent\.verticalCenter/.test(answerRow), 'the answer buttons sit on the right of the same line, centered')
 assert(!/passwordlessArmed/.test(consent.match(/if \(fresh\) \{([\s\S]*?)\n    \}/)[1]), 'a new request carries nothing armed of its own; the payload decides')
 assert(/\+ \(root\.passwordlessArmed\.length > 0 \? "  " \+ Commons\.I18n\.t\("faceConsent\.passwordlessRider"\)\.arg\(root\.passwordlessArmed\) : ""\)/.test(consent.split('\n').find(l => /readonly property string commandLine:/.test(l)) || '') && enShell['faceConsent.passwordlessRider'] === 'and passwordless sudo for %1 min', 'once armed, the command line the user reads includes the passwordless spell')
 assert(/faceConsent\.passwordlessArmed/.test(consent) && /^Passwordless sudo armed: %1 min/.test(enShell['faceConsent.passwordlessArmed']), 'once armed the button gives way to a note')
@@ -81,7 +81,7 @@ assert(killBlock && /visible: root\.verified/.test(killBlock), 'deny-and-kill sh
 // so no requester-supplied text can pick or push aside its own label.
 assert(/readonly property bool verified: \(root\.caller \|\| \{\}\)\.verified === true/.test(consent), 'verified is read from caller.verified and nothing else')
 assert(/\(root\.verified \? Commons\.I18n\.t\("faceConsent\.runAsRoot"\) : Commons\.I18n\.t\("faceConsent\.unverified"\)\) \+ " " \+ String\(\(root\.caller \|\| \{\}\)\.command \|\| ""\)/.test(consent) && enShell['faceConsent.runAsRoot'] === 'Run as root:' && enShell['faceConsent.unverified'] === 'Unverified:', 'line 1 is "Run as root: " or "Unverified: " keyed on caller.verified, then caller.command')
-// Line 2: who asked, from caller.who, labelled.
+// Line 2: who asked, from caller.who, labeled.
 assert(/Commons\.I18n\.t\("faceConsent\.requester"\) \+ " " \+ String\(\(root\.caller \|\| \{\}\)\.who \|\| ""\)/.test(consent) && enShell['faceConsent.requester'] === 'Requester:', 'line 2 is "Requester: " then caller.who')
 
 // The old shapes are gone: no relayed claim, no separately assembled
@@ -131,10 +131,10 @@ for (const state of ['scanning', 'nod', 'confirming', 'password', 'locked']) {
 
 assert(!/queued/.test(consent), 'the window knows no queued state; a waiting request is a notification, not a second window')
 
-// One rule covers the consent and the enrolment namespaces, the way
+// One rule covers the consent and the enrollment namespaces, the way
 // upstream folds its own panels into one regex.
 const rule = layerRules.split('\n').find(line => line.includes('^omarchy-faceauth(-enrol)?$')) || ''
-assert(rule.includes('hl.layer_rule('), 'omarchy-shell.lua carries a layer rule for the consent and enrolment windows', rule)
+assert(rule.includes('hl.layer_rule('), 'omarchy-shell.lua carries a layer rule for the consent and enrollment windows', rule)
 assert(new RegExp('^omarchy-faceauth(-enrol)?$').test('omarchy-faceauth') && new RegExp('^omarchy-faceauth(-enrol)?$').test('omarchy-faceauth-enrol'), 'the one regex matches both namespaces')
 assert(/no_anim = true/.test(rule) && /animation = "none"/.test(rule), 'the consent layer has no animation', rule)
 assert(/no_screen_share = true/.test(rule), 'the consent layer is kept out of screen shares', rule)
@@ -177,8 +177,11 @@ assert(readyButton, 'the card has a Ready to nod button')
 assert(/visible: root\.pending && root\.waiting/.test(readyButton), 'the button shows only while the daemon waits for a re-arm')
 assert(/onClicked: root\.readyToNod\(\)/.test(readyButton), 'the button calls readyToNod')
 
-// The card is drawn on the output that holds the camera.
+// The card is drawn on the output that holds the camera, chosen once for
+// both face overlays in FaceAuthOverlay.
+const overlay = fs.readFileSync(path.join(root, 'shell/Ui/FaceAuthOverlay.qml'), 'utf8')
 const panelBlock = consent.split(/\bPanelWindow \{/)[1] || ''
+assert(/^FaceAuthOverlay \{\n  id: root$/m.test(consent), 'the card is a FaceAuthOverlay')
 assert(/screen: root\.cameraScreen/.test(panelBlock), 'the card is bound to the camera screen')
-assert(/\/\^eDP\/\.test\(String\(screens\[i\]\.name\)\)/.test(consent), 'the camera screen is the built-in panel when there is one')
+assert(/\/\^eDP\/\.test\(String\(screens\[i\]\.name\)\)/.test(overlay), 'the camera screen is the built-in panel when there is one')
 JS

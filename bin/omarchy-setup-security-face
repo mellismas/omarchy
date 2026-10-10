@@ -1,13 +1,13 @@
 #!/bin/bash
 
 # omarchy:summary=Set up face authentication for the lock screen, sudo, and polkit
-# omarchy:args=[--gestures | --walk-away <off|20|30|60> | --obscured-face-lock <never|240|120|60|30|10|5|2|1> | --secure-obscured-face-lock <10|5|2|1>]
+# omarchy:args=[--add [label] | --gestures | --walk-away <on|off> | --away-time <never|20|30|60> | --secure-away-time <20|30|60> | --obscured-face-lock <never|240|120|60|30|10|5|2|1> | --secure-obscured-face-lock <10|5|2|1>]
 # omarchy:requires-sudo=true
 
 set -e
 
-# These enrol the invoking user's face. Under sudo, $USER is root, which would
-# enrol root and leave the real user's templates behind on removal.
+# These enroll the invoking user's face. Under sudo, $USER is root, which would
+# enroll root and leave the real user's templates behind on removal.
 if (( EUID == 0 )); then
   echo "Run omarchy-setup-security-face as your user, not under sudo (it asks for sudo where needed)." >&2
   exit 1
@@ -15,7 +15,7 @@ fi
 target_user=$USER
 
 usage() {
-  echo "Usage: omarchy setup security face [--gestures | --walk-away off|20|30|60 | --obscured-face-lock never|240|120|60|30|10|5|2|1 | --secure-obscured-face-lock 10|5|2|1]" >&2
+  echo "Usage: omarchy setup security face [--add [label] | --gestures | --walk-away on|off | --away-time never|20|30|60 | --secure-away-time 20|30|60 | --obscured-face-lock never|240|120|60|30|10|5|2|1 | --secure-obscured-face-lock 10|5|2|1]" >&2
   exit 1
 }
 
@@ -27,22 +27,27 @@ usage() {
 # looked up through sudo.
 marker_dir=/var/backups/faceauth
 created_marker=$marker_dir/polkit-1.created-by-faceauth
-# sudo: everything the module returns but a match is ignore, and the stack
-# falls to the terminal password as usual (a shake at the window means "not
-# by face"). polkit: a refusal at the window is PAM_AUTH_ERR and ends the
-# stack, and the agent cancels the request on it; otherwise polkit would
-# start the helper again and ask forever.
+# The sudo and polkit-1 lines of FaceAuth's pam-example.txt. The module has
+# three answers: a match is PAM_SUCCESS; the user's no at the window (a head
+# shake, a dismissed window, a confirm after the nods that failed) is
+# PAM_AUTH_ERR, which the daemon sends only for a polkit request; every other
+# outcome, from no daemon to no match, is PAM_IGNORE, so the password lines
+# below stay the fallback.
+#
+# sudo: `sufficient`. The daemon answers a no there with `consent_denied`,
+# which is PAM_IGNORE too, and the stack falls through to the terminal's
+# password prompt, where sudo asks anyway.
+# polkit: the same line with a different control. Under `sufficient` a no
+# would fall through to polkit's password dialog, and polkit would start the
+# helper again and ask forever; auth_err=die ends the stack on it instead,
+# the agent cancels the request, and polkit reports "Not authorized".
 face_line='auth      sufficient pam_faceauth.so socket=/run/faceauth/sock consent'
 polkit_face_line='auth      [success=done auth_err=die default=ignore] pam_faceauth.so socket=/run/faceauth/sock consent'
 
 # Elevation is a deliberate act: the line carries `consent`, so the daemon
-# opens a window naming the request and approves it only on two nods (or the
-# password typed there). Sitting in front of the machine never elevates
-# anything by itself. Every failure inside the module is PAM_IGNORE, so the
-# password path stays the floor. What the user's own no does depends on the
-# stack: on sudo, `sufficient` turns it into ignore too and the terminal
-# prompt follows; on polkit, auth_err=die ends the stack so the agent can
-# cancel the request.
+# opens a window naming the command and the requester, and the request is
+# approved by two nods or by the password typed into that window. Sitting in
+# front of the machine never elevates anything by itself.
 #
 # The line goes above the password but after any fingerprint or FIDO2 line,
 # whichever was set up first: a touch or a tap then still answers first,
@@ -101,11 +106,12 @@ EOF
   fi
 }
 
-# The lock screen's face stack is its own PAM service beside the password and
+# The omarchy-lock-face block of FaceAuth's pam-example.txt. The lock
+# screen's face stack is its own PAM service beside the password and
 # fingerprint ones, so it takes no prompt: looking at the machine is the act.
 # The password is a separate service on its own lane, so this one must be
 # closed: an ignore-only stack fails closed on Linux-PAM 1.7.2
-# (PAM_PERM_DENIED), but that is library behaviour, not a promise, and
+# (PAM_PERM_DENIED), but that is library behavior, not a promise, and
 # pam_deny makes it explicit.
 setup_lock_face_pam() {
   echo "Configuring lock screen for face authentication..."
@@ -117,10 +123,10 @@ account    include                     system-local-login
 EOF
 }
 
-# After a successful enrolment setup asks for both obscured face lock times,
+# After a successful enrollment setup asks for both obscured face lock times,
 # with the shipped ones selected, and saves them with `presence
 # obscured-lock`, which never switches the walk-away lock on. With no
-# terminal to ask on, or a choice cancelled, nothing is saved: the times
+# terminal to ask on, or a choice canceled, nothing is saved: the times
 # stay as they are, the shipped ones on a first setup.
 obscured_value() {
   case $1 in
@@ -165,7 +171,7 @@ ask_obscured_face_lock() {
 # live.
 closing_note() {
   echo
-  echo "Walk-away lock: turn it on or off, and change its away time and the obscured face lock times, under Setup > Security > Face > Walk-Away Lock."
+  echo "Walk-away lock: enable it, and change its away times and obscured face lock times, under Setup > Security > Face > Walk-Away Lock (Enable, Away Time, Obscured Face)."
   echo "While it is on, its icon sits in the top bar: a left click switches between default and secure mode, a right click lists the modes, and Super + Ctrl + Shift + L switches them from the keyboard."
 }
 
@@ -177,7 +183,7 @@ setup_face() {
     echo -e "\e[31mNo supported infrared camera detected.\e[0m"
     echo "Face authentication drives an Intel IPU3 IR sensor (ov7251) whose illuminator the kernel exposes as a control."
     echo "USB (UVC) IR modules, the kind most Windows Hello laptops use, are not supported yet: their emitter cannot be switched, so the liveness check cannot run."
-    echo "A colour webcam is deliberately not enough: it cannot see in the dark and is easy to fool with a photo."
+    echo "A color webcam is deliberately not enough: it cannot see in the dark and is easy to fool with a photo."
     exit 1
   fi
 
@@ -185,18 +191,20 @@ setup_face() {
   omarchy-hw-ir-camera-list | sed 's/^/  /'
   echo
 
-  # The models are their own package, so pacman owns and verifies the 260 MB
-  # and removal takes it away; nothing is downloaded by this script.
-  if omarchy-pkg-missing omarchy-faceauth omarchy-faceauth-models; then
+  # The daemon package is a few MB; the models are 260 MB in a package of their
+  # own. The daemon comes first because the check below needs it, and the
+  # models only once this machine has passed that check.
+  if omarchy-pkg-missing omarchy-faceauth; then
     echo "Installing face authentication..."
-    omarchy-pkg-add omarchy-faceauth omarchy-faceauth-models
+    omarchy-pkg-add omarchy-faceauth
   fi
 
   # The daemon refuses every attempt on a camera it cannot open or whose
   # illuminator it cannot switch (the stock ov7251 driver has no strobe
-  # control), so the check comes before enrolment, not after an enrolment that
-  # can never verify. Doctor reaches the strobe check only as
+  # control), so the check comes before the models and enrollment, not after
+  # an enrollment that can never verify. Doctor reaches the strobe check only as
   # root: as the user, the sensor's node is root-only once the udev rule holds.
+  local stopped="The face models were not downloaded. 'omarchy remove security face' takes the face authentication package off again."
   doctor=$(sudo faceauth doctor --json) || true
   camera_row() { jq -r --arg id "$1" '.[] | select(.id == $id) | "\(.status) \(.detail)"' <<<"$doctor" 2>/dev/null; }
   ir_row=$(camera_row camera.ir)
@@ -205,25 +213,34 @@ setup_face() {
     echo -e "\e[31mThe face authentication service cannot open the infrared camera.\e[0m"
     echo "  camera.ir: ${ir_row:-no answer from faceauth doctor}"
     echo "Run 'sudo faceauth doctor' for the full picture."
+    echo "$stopped"
     exit 1
   fi
   if [[ $illuminator_row != pass* ]]; then
     echo -e "\e[31mThis kernel cannot drive the infrared illuminator, so face authentication would refuse every attempt.\e[0m"
     echo "  camera.illuminator: ${illuminator_row:-no answer from faceauth doctor}"
     echo "The ov7251 driver needs the strobe-control patch, which the stock Omarchy kernel does not carry yet."
+    echo "$stopped"
     exit 1
+  fi
+
+  # pacman owns and verifies the models, and removal takes them away; nothing
+  # is downloaded by this script itself.
+  if omarchy-pkg-missing omarchy-faceauth-models; then
+    echo "Installing the face models (about 260 MB)..."
+    omarchy-pkg-add omarchy-faceauth-models
   fi
 
   echo "Starting the face authentication service..."
   sudo systemctl enable --now faceauth.service
 
-  # Enrol before touching PAM, and wire PAM only after a verification succeeds:
+  # Enroll before touching PAM, and wire PAM only after a verification succeeds:
   # a stack pointed at a module with nothing to match would be wrong twice.
-  echo -e "\e[32m\nLet's enrol your face. A window opens and walks you through it: sit as you normally do, then keep the dot on the target as it moves, so the match holds as you actually sit, not only square to the camera.\e[0m"
+  echo -e "\e[32m\nLet's enroll your face. A window opens and walks you through it: sit as you normally do, then keep the dot on the target as it moves, so the match holds as you actually sit, not only square to the camera.\e[0m"
   echo "Your templates are numbers derived from your face, never images, stored root-only."
   echo -e "On a machine with a TPM they are sealed to it; without one they are plaintext, and 'faceauth doctor' says which.\n"
 
-  # Enrolment changes who can unlock the machine, so the daemon takes it only
+  # Enrollment changes who can unlock the machine, so the daemon takes it only
   # from root: sudo here is the password (or an existing face) standing behind it.
   if sudo faceauth enroll --user "$target_user" --guided; then
     echo -e "\nNow let's verify it works.\n"
@@ -241,34 +258,80 @@ setup_face() {
       # does not fail setup, and the widget can be put on the bar later.
       omarchy-bar put omarchy.faceauth.presence --before omarchy.power 2>/dev/null || true
       echo -e "\e[32m\nFace authentication is set up.\e[0m"
-      echo "Lock screen: look at the camera. sudo and polkit: nod twice at the window, shake to refuse, or type your password there."
+      echo "Lock screen: look at the camera. sudo and polkit: nod twice at the window, or type your password there."
+      echo "A head shake refuses: sudo then asks for your password in the terminal, and polkit cancels the request."
       echo "Run 'faceauth doctor' any time to see the state of every part."
       closing_note
     else
-      echo -e "\e[31m\nVerification failed. Enrolment is kept; try 'faceauth auth' facing the camera, then run this again.\e[0m"
+      echo -e "\e[31m\nVerification failed. Enrollment is kept; try 'faceauth auth' facing the camera, then run this again.\e[0m"
       exit 1
     fi
   else
-    echo -e "\e[31m\nEnrolment failed. Please try again.\e[0m"
+    echo -e "\e[31m\nEnrollment failed. Please try again.\e[0m"
     exit 1
   fi
 }
 
-# The menu's Tune Gestures, Walk-Away and obscured face rows come through here
-# instead of running sudo faceauth themselves: privileged work goes through
-# an omarchy command, as omarchy-sudo-passwordless does, so the root guard
-# above covers them and the menu file names no sudo. Each leaves the rest of
-# setup alone. A walk-away change restarts the service, which also puts the
-# mode chosen from the bar or Super+Ctrl+Shift+L back to the one in the config.
+# Another look (glasses, a beard, lamp light) goes into the identity setup
+# enrolled, under a label, and nothing else of setup runs: no PAM file is
+# written. The menu's Add Look row runs it. The package is what makes face
+# authentication set up; a stopped service is said as such, not as "not set
+# up".
+add_look() {
+  local label=$1
+  if omarchy-pkg-missing omarchy-faceauth; then
+    echo -e "\e[31mFace authentication is not set up yet.\e[0m Run: omarchy setup security face"
+    exit 1
+  fi
+  if ! systemctl is-active --quiet faceauth.service; then
+    echo -e "\e[31mThe face authentication service is not running.\e[0m Start it with: sudo systemctl start faceauth.service"
+    exit 1
+  fi
+
+  if [[ -z $label ]]; then
+    label=$(gum input --prompt "Label for this look> " --placeholder "glasses, beard or lamp") || exit 1
+  fi
+  label=${label//[^A-Za-z0-9_-]/}
+  # A leading dash would reach faceauth as an option (--label -h).
+  while [[ $label == -* ]]; do
+    label=${label#-}
+  done
+  [[ -n $label ]] || label=extra
+
+  echo -e "\e[32m\nEnrolling another look ('$label'). A window opens: keep the dot on the target as it moves.\e[0m"
+  echo "Templates are merged into your existing identity, matched by best score."
+  echo
+
+  if sudo faceauth enroll --user "$target_user" --label "$label" --guided --start distance; then
+    echo -e "\e[32m\nAdded. Try it: 'faceauth auth' facing the camera in this look.\e[0m"
+  else
+    echo -e "\e[31m\nEnrollment failed. Please try again.\e[0m"
+    exit 1
+  fi
+}
+
+# The menu's Tune Gestures, Walk-Away Lock, Away Time and Obscured Face rows
+# come through here instead of running sudo faceauth themselves: privileged
+# work goes through an omarchy command, as omarchy-sudo-passwordless does, so
+# the root guard above covers them and the menu file names no sudo. Each
+# leaves the rest of setup alone. Enable and Disable run `presence on` and
+# `off`, which restart the service and so also put the mode chosen from the
+# bar or Super+Ctrl+Shift+L back to the one in the config; `on` keeps the saved away
+# times.
 #
-# The obscured face lock time is how long a face that is partly covered or
-# turned away (a hand on the chin, a look down) keeps the session open while
-# the same shape stays in the chair, one time per walk-away mode. The two
-# flags take only the values the menu offers and go through `presence
-# obscured-lock`, which saves that one time and leaves the walk-away lock on
-# or off as it was.
+# The away time is how long the chair stays empty before the session locks,
+# one per walk-away mode; only default mode may be never. The obscured face
+# lock time is how long a face that is partly covered or turned away (a hand
+# on the chin, a look down) keeps the session open while the same shape stays
+# in the chair, one per mode. The time flags take only the values the menu
+# offers and go through `presence away-time` or `presence obscured-lock`,
+# which save that one time and leave the walk-away lock on or off as it was.
 case ${1:-} in
   "") setup_face ;;
+  --add)
+    (( $# <= 2 )) || usage
+    add_look "${2:-}"
+    ;;
   --gestures)
     (( $# == 1 )) || usage
     sudo faceauth calibrate --user "$target_user" --guided
@@ -276,8 +339,21 @@ case ${1:-} in
   --walk-away)
     (( $# == 2 )) || usage
     case $2 in
-      off) sudo faceauth presence off --user "$target_user" ;;
-      20|30|60) sudo faceauth presence on --user "$target_user" --away-seconds "$2" ;;
+      on|off) sudo faceauth presence "$2" --user "$target_user" ;;
+      *) usage ;;
+    esac
+    ;;
+  --away-time)
+    (( $# == 2 )) || usage
+    case $2 in
+      never|20|30|60) sudo faceauth presence away-time --default "$2" ;;
+      *) usage ;;
+    esac
+    ;;
+  --secure-away-time)
+    (( $# == 2 )) || usage
+    case $2 in
+      20|30|60) sudo faceauth presence away-time --secure "$2" ;;
       *) usage ;;
     esac
     ;;

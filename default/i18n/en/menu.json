@@ -662,16 +662,49 @@
   "setup.security.face.lock": {
     "label": "Walk-Away Lock"
   },
-  "setup.security.face.lock.off": {
-    "label": "Off"
+  "setup.security.face.lock.enable": {
+    "label": "Enable",
+    "description": "Locks the session once nobody has been in front of the machine for the away time."
   },
-  "setup.security.face.lock.20": {
+  "setup.security.face.lock.disable": {
+    "label": "Disable",
+    "description": "Stops the walk-away lock and keeps its away times and obscured face lock times."
+  },
+  "setup.security.face.lock.away": {
+    "label": "Away Time",
+    "title": "Away time",
+    "description": "How long the chair stays empty before the session locks, in default mode and in secure mode."
+  },
+  "setup.security.face.lock.away.default": {
+    "label": "Default mode",
+    "title": "Away, default mode",
+    "description": "How long the chair stays empty before the session locks in default mode."
+  },
+  "setup.security.face.lock.away.default.never": {
+    "label": "Never",
+    "description": "Default mode never locks the session, even with the chair empty; only secure mode does."
+  },
+  "setup.security.face.lock.away.default.20": {
     "label": "After 20 seconds"
   },
-  "setup.security.face.lock.30": {
+  "setup.security.face.lock.away.default.30": {
     "label": "After 30 seconds"
   },
-  "setup.security.face.lock.60": {
+  "setup.security.face.lock.away.default.60": {
+    "label": "After 60 seconds"
+  },
+  "setup.security.face.lock.away.secure": {
+    "label": "Secure mode",
+    "title": "Away, secure mode",
+    "description": "How long the chair stays empty before the session locks in secure mode, where an empty chair always locks."
+  },
+  "setup.security.face.lock.away.secure.20": {
+    "label": "After 20 seconds"
+  },
+  "setup.security.face.lock.away.secure.30": {
+    "label": "After 30 seconds"
+  },
+  "setup.security.face.lock.away.secure.60": {
     "label": "After 60 seconds"
   },
   "setup.security.face.lock.obscured": {

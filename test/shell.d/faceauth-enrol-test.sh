@@ -4,7 +4,7 @@ set -euo pipefail
 
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
-# The enrolment walk-through window draws a dot from the daemon's pose
+# The enrollment walk-through window draws a dot from the daemon's pose
 # stream and never asks for, receives or shows a camera image. Its only
 # way back to the daemon is continue, redo and cancel.
 
@@ -33,6 +33,7 @@ assert(/readonly property real dotX: root\.dotUx \* root\.ringRadius/.test(qml),
 assert(/ctx\.setLineDash/.test(qml), 'the target is a dashed circle')
 assert(/width: root\.ringRadius \* 0\.70/.test(qml), 'the target circle is drawn at the daemon\'s acceptance radius')
 assert(/readonly property real dotRadius: [\s\S]*root\.size/.test(qml), 'the dot\'s size follows the distance')
+assert(/^FaceAuthOverlay \{\n  id: root$/m.test(qml), 'the window is a FaceAuthOverlay, which picks the camera\'s screen')
 assert(/screen: root\.cameraScreen/.test(qml), 'the window is drawn on the camera\'s screen')
 assert(/WlrLayershell\.namespace: "omarchy-faceauth-enrol"/.test(qml), 'the layer has its own namespace for a layer rule')
 

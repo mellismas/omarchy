@@ -273,6 +273,10 @@ Item {
     }
   }
 
+  // The old agent is only deleted once control returns to the event loop, and
+  // while it lives it holds Quickshell's one agent slot, so an agent made in
+  // the same handler never registers. The new one is made on the next turn,
+  // after the old one is gone.
   Timer {
     id: registerRetry
     interval: 3000
@@ -281,8 +285,12 @@ Item {
     onTriggered: {
       if (root.agentRegistered) return
       agentLoader.active = false
-      agentLoader.active = true
+      Qt.callLater(root.reloadAgent)
     }
+  }
+
+  function reloadAgent() {
+    agentLoader.active = true
   }
 
   Connections {

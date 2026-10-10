@@ -14,22 +14,30 @@ import qs.Ui
 // go through the daemon's own socket, where only a local process of the
 // watched user is heard, so the widget holds no state the daemon does not.
 // It is hidden when the presence watch is off or faceauth is not installed.
-// Right click drops a menu of the two modes.
+// Right click drops a menu of the two modes. A camera that cannot flash its
+// IR light cannot hold the secure mode's promise; the daemon says so, and
+// the widget then offers secure nowhere and says why.
 BarWidget {
   id: root
   moduleName: "omarchy.faceauth.presence"
 
   property bool watching: false
   property string mode: "default"
+  property bool secureAvailable: true
   property bool busy: false
+  property bool switching: false
   property bool menuOpen: false
+
+  readonly property string secureUnavailableHint: I18n.t("facePresence.secureUnavailableHint")
 
   function close() { menuOpen = false }
 
   function choose(next) {
     root.menuOpen = false
     if (root.busy || !root.watching || next === root.mode) return
+    if (next === "secure" && !root.secureAvailable) return
     root.busy = true
+    root.switching = true
     watchdog.restart()
     modeProc.command = ["/usr/bin/faceauth", "presence", "mode", next]
     modeProc.running = true
@@ -44,6 +52,7 @@ BarWidget {
   function refresh() {
     if (root.busy) return
     root.busy = true
+    root.switching = false
     watchdog.restart()
     modeProc.command = ["/usr/bin/faceauth", "presence", "mode"]
     modeProc.running = true
@@ -51,7 +60,9 @@ BarWidget {
 
   function toggle() {
     if (root.busy || !root.watching) return
+    if (!root.secure && !root.secureAvailable) return
     root.busy = true
+    root.switching = true
     watchdog.restart()
     modeProc.command = ["/usr/bin/faceauth", "presence", "mode", root.secure ? "default" : "secure"]
     modeProc.running = true
@@ -64,6 +75,7 @@ BarWidget {
       if (!p) return
       root.watching = p.watching === true
       root.mode = p.mode === "secure" ? "secure" : "default"
+      root.secureAvailable = p.secure_available !== false
     } catch (e) {
       // Not a state line: the daemon is not there or refused. Say nothing
       // and show nothing until the next refresh.
@@ -78,7 +90,15 @@ BarWidget {
     onExited: function(exitCode) {
       watchdog.stop()
       root.busy = false
-      if (exitCode !== 0) root.watching = false
+      var wasSwitch = root.switching
+      root.switching = false
+      // A refused switch (the camera cannot hold secure mode, or has not
+      // been checked since faceauth started) leaves the widget up and
+      // reads the state afresh; only a failed read hides it.
+      if (exitCode !== 0) {
+        if (wasSwitch) root.refresh()
+        else root.watching = false
+      }
     }
   }
 
@@ -99,7 +119,7 @@ BarWidget {
   // to the config) and when a face is enrolled or deleted. The timer is only
   // for the last two, so it is slow: every poll is a daemon connection, and
   // the daemon answers it from its own bookkeeping without touching the
-  // camera, so a poll can never queue behind an enrolment.
+  // camera, so a poll can never queue behind an enrollment.
   Timer {
     interval: 300000
     running: true
@@ -133,7 +153,8 @@ BarWidget {
     fontSize: Style.font.caption
     tooltipText: root.secure
       ? I18n.t("facePresence.tooltipSecure")
-      : I18n.t("facePresence.tooltipDefault")
+      : I18n.t("facePresence.tooltipDefault") + " "
+        + (root.secureAvailable ? I18n.t("facePresence.tooltipDefaultSwitch") : I18n.t("facePresence.secureUnavailable"))
     onPressed: function(b) {
       if (b === Qt.RightButton) root.menuOpen = !root.menuOpen
       else root.toggle()
@@ -181,6 +202,7 @@ BarWidget {
             foreground: root.bar.foreground
             fontSize: Style.font.bodySmall
             selected: parent.modelData.value === root.mode
+            enabled: parent.modelData.value !== "secure" || root.secureAvailable
             horizontalPadding: Style.spacing.controlPaddingX
             verticalPadding: Style.spacing.controlPaddingY
             onClicked: root.choose(parent.modelData.value)
@@ -188,7 +210,7 @@ BarWidget {
 
           Text {
             textFormat: Text.PlainText
-            text: parent.modelData.hint
+            text: parent.modelData.value !== "secure" || root.secureAvailable ? parent.modelData.hint : root.secureUnavailableHint
             color: Qt.darker(root.bar.foreground, 1.4)
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.caption

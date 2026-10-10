@@ -87,6 +87,15 @@ Item {
   onPasswordTextChanged: syncPasswordText()
   onInputEnabledChanged: {
     if (inputEnabled) Qt.callLater(forcePasswordFocus)
+    pointerGate.reset()
+  }
+
+  // A lock surface that maps under a pointer already resting there gets a
+  // position sample nobody made; waking on it started a face scan at every
+  // lock. Only movement past that first sample counts as a hand on the mouse.
+  PointerMoveGate {
+    id: pointerGate
+    referenceItem: root
   }
   Component.onCompleted: {
     syncPasswordText()
@@ -153,10 +162,11 @@ Item {
     }
 
     MouseArea {
+      id: wakeArea
       anchors.fill: parent
       hoverEnabled: true
       onClicked: { root.wakeRequested(); root.forcePasswordFocus() }
-      onPositionChanged: root.wakeRequested()
+      onPositionChanged: function(mouse) { if (pointerGate.moved(wakeArea, mouse)) root.wakeRequested() }
     }
 
 
@@ -253,7 +263,7 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         visible: root.faceConfigured
         text: "󰙃"
-        color: root.faceState === "scanning" ? Color.lock.borderActive : Color.lock.placeholder
+        color: root.faceState === "scanning" ? Commons.Color.lock.borderActive : Commons.Color.lock.placeholder
         opacity: root.faceState === "probing" ? 0.45 : 1.0
         font.family: Style.font.family
         font.pixelSize: Math.round(root.fieldFontSize * 1.1)
@@ -261,7 +271,7 @@ Item {
         verticalAlignment: Text.AlignVCenter
 
         SequentialAnimation on opacity {
-          running: root.faceState === "scanning"
+          running: root.faceState === "scanning" && !Style.reduceMotion
           loops: Animation.Infinite
           NumberAnimation { to: 0.35; duration: 500; easing.type: Easing.InOutSine }
           NumberAnimation { to: 1.0; duration: 500; easing.type: Easing.InOutSine }

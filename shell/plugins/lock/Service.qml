@@ -2,10 +2,12 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import Quickshell.Services.Pam
+import Quickshell.Services.UPower
 import Quickshell.Wayland
 import qs.Commons
 import qs.Commons as Commons
 import "FingerprintModel.js" as FingerprintModel
+import "LockFaceModel.js" as LockFaceModel
 
 Item {
   id: root
@@ -83,17 +85,14 @@ Item {
   // lit (and the face scan, camera and illuminator with it) by repeating the
   // call. Cleared when the lock ends.
   property bool presenceLitUsed: false
-  // After a few failed scans with the panel lit (nobody there), the loop
-  // stops scanning and probes instead, exactly as it does while blank.
-  property int faceFailures: 0
-  property bool faceProbeMode: false
-  // After three misses the probe stops waking or rescanning for the face
-  // that just failed: sitting back in view otherwise cycled the panel and
-  // spent the daemon's five tries a minute on scans that could not pass.
-  // The face has to leave and come back, or come noticeably closer.
-  property bool faceNeedsReturn: false
-  property real faceFailedPx: 0
-  property real faceLastProbePx: 0
+  // The face cascade (LockFaceModel.js): a short probe on a cadence, dark
+  // panel or lit, and a full scan only for a face near enough to judge,
+  // likely the owner's and turned to the screen. The daemon sends its cadence table with each probe
+  // reply; the power state picks the entry, read the way the lock wallpaper
+  // reads it for power saving.
+  property var faceCadence: LockFaceModel.defaultCadence()
+  readonly property string powerProfile: batteryService ? batteryService.activePowerProfile : ""
+  readonly property real faceProbeSeconds: LockFaceModel.cadenceSeconds(faceCadence, UPower.onBattery, powerProfile)
   readonly property string faceState: !faceConfigured ? "" : (faceAuthenticating ? "scanning" : (displaysBlank ? "probing" : "idle"))
   readonly property bool locked: lockRequested || sessionLock.locked || sessionLock.secure
 
@@ -255,11 +254,6 @@ Item {
     fingerprintReachTimer.stop()
     fingerprintResumeTimer.stop()
     faceAuthenticating = false
-    faceFailures = 0
-    faceProbeMode = false
-    faceNeedsReturn = false
-    faceFailedPx = 0
-    faceLastProbePx = 0
     faceRetryTimer.stop()
     if (passwordPam.active) passwordPam.abort()
     if (fingerprintPam.active) fingerprintPam.abort()
@@ -316,8 +310,8 @@ Item {
     if (lockRequested) armBlankTimer()
     resumeFingerprint()
     nudgeFingerprint()
-    faceFailures = 0
-    faceProbeMode = false
+    // A key, a click or a move on the lock view lands here: a hands-on wake
+    // scans at once, without waiting for the probe or its verdict.
     startFace()
   }
 
@@ -560,12 +554,14 @@ Item {
   // When the daemon answers at once (a cooldown hold, a busy camera, an
   // error) an attempt costs twenty milliseconds, and any path that starts
   // the next one on completion would spin. No scan starts within a second
-  // of the last start; the retry timer takes it instead.
+  // of the last start; the retry timer takes it instead. A scan starts from
+  // a probe that found the owner's face likely and turned to the screen, or
+  // from a hands-on wake.
   property double lastFaceStartAt: 0
 
   function startFace() {
     if (!lockRequested || !sessionLock.secure || !faceConfigured) return
-    if (displaysBlank || faceProbeMode) return
+    if (displaysBlank) return
     if (facePam.active || faceAuthenticating) return
     if (Date.now() - lastFaceStartAt < 1000) {
       faceRetryTimer.restart()
@@ -587,21 +583,34 @@ Item {
     logFaceEvent("face-finished: " + (result === PamResult.Success ? "success" : "result=" + result))
 
     if (!lockRequested) return
+    // A miss goes back to the probe, which starts over now that no scan
+    // runs: the next look is a full cadence away and nothing rescans at once.
     if (result === PamResult.Success) {
       finishUnlock()
-    } else if (faceConfigured && !displaysBlank) {
-      faceFailures += 1
-      // Three misses with the panel lit means nobody is there: stop scanning
-      // (camera and illuminator) and let the cheap probe watch for a return.
-      if (faceFailures >= 3) {
-        faceProbeMode = true
-        faceNeedsReturn = true
-        faceFailedPx = faceLastProbePx
-        logFaceEvent("face-probe-mode: on")
-      } else {
-        faceRetryTimer.restart()
-      }
     }
+  }
+
+  // One probe reply, dark panel or lit. Only a face near enough to judge,
+  // likely the owner's and turned to the screen starts the full scan, waking
+  // a dark panel for it; no face, one too far away, one unlikely to be the
+  // owner's or one turned away changes nothing and waits for the next probe.
+  function handleProbeReply(text) {
+    var reply = LockFaceModel.parseProbe(text)
+    if (reply.cadence) faceCadence = reply.cadence
+    if (!lockRequested || faceAuthenticating) return
+    var action = LockFaceModel.probeAction(reply)
+    if (action !== "scan") {
+      if (action !== "no-face") logFaceEvent("face-probe: " + action + " (" + Math.round(reply.facePx) + " px), staying " + (displaysBlank ? "dark" : "idle"))
+      return
+    }
+    logFaceEvent("face-probe: likely and attentive, " + (displaysBlank ? "waking to scan" : "scanning"))
+    if (displaysBlank) runWake()
+    else startFace()
+  }
+
+  function probeFace() {
+    if (!lockRequested || !faceConfigured || previewVisible || faceAuthenticating) return
+    if (!faceProbeProc.running) faceProbeProc.running = true
   }
 
   WlSessionLock {
@@ -616,7 +625,7 @@ Item {
         sessionLockStabilizeTimer.stop()
         pendingSessionLockTimer.stop()
         root.startFingerprint()
-        root.startFace()
+        root.probeFace()
       }
     }
 
@@ -845,23 +854,19 @@ Item {
     onError: function(error) {
       root.faceAuthenticating = false
       root.logFaceEvent("face-error: " + error)
-      if (root.lockRequested && root.faceConfigured && !root.displaysBlank) faceRetryTimer.restart()
     }
   }
 
-  // While the panel is blank the scan loop is off (it would run the camera and
-  // its illuminator all night). Instead the daemon is asked every few seconds
-  // for one short look, detector only; a face wakes the panel, and the wake
-  // starts the scan. Sitting back down opens the screen with nothing touched.
+  // The probe: one short look every faceProbeSeconds while locked, dark
+  // panel or lit. It stops while a scan runs and starts over when the scan
+  // ends, so a miss waits a full cadence for the next look. The first look
+  // comes when the lock turns secure.
   Timer {
     id: faceProbeTimer
-    interval: 3000
+    interval: Math.round(root.faceProbeSeconds * 1000)
     repeat: true
-    running: root.lockRequested && (root.displaysBlank || root.faceProbeMode) && root.faceConfigured && !root.previewVisible
-    triggeredOnStart: true
-    onTriggered: {
-      if (!faceProbeProc.running) faceProbeProc.running = true
-    }
+    running: root.lockRequested && root.faceConfigured && !root.previewVisible && !root.faceAuthenticating
+    onTriggered: root.probeFace()
   }
 
   Process {
@@ -871,51 +876,7 @@ Item {
       id: faceProbeStdout
       waitForEnd: true
     }
-    onExited: {
-      var text = String(faceProbeStdout.text || "")
-      if (!root.lockRequested || !(root.displaysBlank || root.faceProbeMode)) return
-      // Wake a blank panel only for a face turned towards the screen; a
-      // face merely in view (someone at the next desk, a glance past the
-      // machine) leaves it dark. A lit panel scans on any face.
-      var present = text.indexOf('"face":true') !== -1
-      var attentive = text.indexOf('"attentive":true') !== -1
-      var info = {}
-      try { info = JSON.parse(text) } catch (e) { info = {} }
-      // A face too far to judge wakes nothing: its scan cannot pass and
-      // would spend one of the daemon's tries. A daemon without the field
-      // answers as before.
-      var scannable = info.scannable !== false
-      var facePx = Number(info.face_px || 0)
-      if (!present) root.faceNeedsReturn = false
-      if (present && root.faceNeedsReturn && !(root.faceFailedPx > 0 && facePx >= root.faceFailedPx * 1.25)) {
-        root.logFaceEvent("face-probe: the face that just failed, no closer; staying " + (root.displaysBlank ? "dark" : "idle"))
-        return
-      }
-      if (present && !scannable) {
-        root.logFaceEvent("face-probe: too far to judge (" + Math.round(facePx) + " px); staying " + (root.displaysBlank ? "dark" : "idle"))
-        return
-      }
-      if (present) root.faceLastProbePx = facePx
-      if (present && (attentive || !root.displaysBlank)) {
-        root.faceNeedsReturn = false
-        root.logFaceEvent("face-probe: " + (attentive ? "attentive" : "present") + ", " + (root.displaysBlank ? "waking" : "scanning"))
-        if (root.displaysBlank) root.runWake()
-        else { root.faceProbeMode = false; root.faceFailures = 0; root.startFace() }
-      } else if (present) {
-        root.logFaceEvent("face-probe: present but not attentive, staying dark")
-      }
-    }
-  }
-
-  // An attempt that failed has already spent the daemon's own timeout; this only
-  // spaces the retries. The daemon reports "no face" in about a second when the
-  // seat is empty, so an empty desk costs one short attempt every 1.5 s until
-  // the panel blanks, and nothing after that.
-  Timer {
-    id: faceRetryTimer
-    interval: 1500
-    repeat: false
-    onTriggered: root.startFace()
+    onExited: root.handleProbeReply(faceProbeStdout.text)
   }
 
   // Setup writes this PAM service only once a face is enrolled, so its presence
@@ -983,6 +944,15 @@ Item {
     onTriggered: root.refreshFingerprintStatus()
   }
 
+  // Only spaces scan starts: a scan asked for within a second of the last
+  // start waits here for the rest of that second.
+  Timer {
+    id: faceRetryTimer
+    interval: 1000
+    repeat: false
+    onTriggered: root.startFace()
+  }
+
   Process {
     id: strandedLockCheckProc
     // $PPID is this shell: a crash re-execs in place, so its pid is the one to skip.
@@ -1048,10 +1018,11 @@ Item {
         return
       }
       // A password check in flight holds the display up, and so does a face
-      // attempt or its retry: blanking cancelled the scan mid-attempt and the
-      // probe woke the panel again, one attempt per wake. The three-miss rule
-      // still ends the face loop. The fingerprint PAM stays armed for the
-      // whole lock, so gating on `authenticating` would keep it lit forever.
+      // attempt or a start waiting out its second: blanking canceled the
+      // scan mid-attempt and the probe woke the panel again, one attempt per
+      // wake. A miss hands back to the probe, so the hold ends with the scan.
+      // The fingerprint PAM stays armed for the whole lock, so gating on
+      // `authenticating` would keep it lit forever.
       if (root.faceAuthenticating || faceRetryTimer.running) {
         root.armBlankTimer()
         return
@@ -1154,7 +1125,11 @@ Item {
       if (!root.passwordPamConfigured) return "missing-pam"
       // omarchy-system-sleep-lock asks for the lock before every suspend.
       if (root.currentlyLocked()) root.noteSleepRequested()
-      root.blankDelayMs = root.blankDelayDefaultMs
+      // Only a new lock takes the ordinary blank delay. The daemon's lock
+      // helper calls lockPresence and then this, and resetting the delay on
+      // the lock already up cut the walk-away lit window to a few seconds at
+      // the next wake.
+      if (!root.currentlyLocked()) root.blankDelayMs = root.blankDelayDefaultMs
       if (!root.currentlyLocked() && !root.beginLock()) return "failed"
       return "ok"
     }

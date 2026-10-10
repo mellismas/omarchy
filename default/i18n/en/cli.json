@@ -98,6 +98,8 @@
   "faceauth.lockModeFailed": "The mode could not be changed; is faceauth running?",
   "faceauth.lockSecureBody": "Only your face keeps it open; the first look at anyone else locks. Until faceauth restarts.",
   "faceauth.lockSecureTitle": "Walk-away lock: secure",
+  "faceauth.lockSecureUnavailableBody": "This camera cannot flash its IR light, which secure mode needs to tell your face from a photo. The lock stays in default.",
+  "faceauth.lockSecureUnavailableTitle": "Walk-away lock: secure is not available",
   "faceauth.lockTitle": "Walk-away lock",
   "files.selectFile": "Select file",
   "font.cjkChanged": "Chinese, Japanese, and Korean glyph forms changed",

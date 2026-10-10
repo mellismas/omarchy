@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "id": "omarchy.faceauth.enrol",
-  "name": "Face Authentication Enrolment",
+  "name": "Face Authentication Enrollment",
   "version": "1.0.0",
   "author": "Omarchy",
-  "description": "The enrolment walk-through: a dot to steer into targets while the face daemon records the looks it needs.",
+  "description": "The enrollment walk-through: a dot to steer into targets while the face daemon records the looks it needs.",
   "omarchy": {
     "capabilities": [
       "authentication"

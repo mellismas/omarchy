@@ -73,7 +73,7 @@ The **Dropbox** panel handles login, shows how much storage you've used, and lis
 
 Removing either service takes its widget back off the bar.
 
-The **walk-away lock** widget joins the bar when you set up [face authentication](37-hardware-authentication.md) and shows while the presence watch is on: a left click switches between the default and secure modes, a right click lists them, and `Super + Ctrl + Shift + L` does the same from the keyboard. Removing face authentication takes it off again.
+The **walk-away lock** widget joins the bar when you set up [face authentication](37-hardware-authentication.md) and shows while the walk-away lock is on: a left click switches between the default and secure modes, a right click lists them, and `Super + Ctrl + Shift + L` does the same from the keyboard. Removing face authentication takes it off again.
 
 ## Indicators
 

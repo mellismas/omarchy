@@ -3,17 +3,19 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
-// The enrolment walk-through. Opened by faceauthd (root) through
+// The enrollment walk-through. Opened by faceauthd (root) through
 // `omarchy-shell shell summon omarchy.faceauth.enrol` when a session starts.
 // The window then watches the daemon's stream over its own socket
 // connection: one line per frame with where the face is, how big, which way
 // it is turned, the step at hand and whether the frame counts. It draws a
 // dot the person steers into a target and never sees a camera image. Its
 // buttons send continue, redo and cancel back; the daemon decides
-// everything else and stores the templates.
-Item {
+// everything else and stores the templates. FaceAuthOverlay gives the
+// window the menu's palette and the camera's screen.
+FaceAuthOverlay {
   id: root
 
   property bool opened: false
@@ -24,7 +26,7 @@ Item {
   property real size: 0
   property string distance: "far"
   // The dot and the target, in ring units from the daemon: 0 is the
-  // centre, 1 is the ring. The daemon maps the readings, so what counts
+  // center, 1 is the ring. The daemon maps the readings, so what counts
   // and what is drawn agree.
   property real dotUx: 0
   property real dotUy: 0
@@ -54,14 +56,6 @@ Item {
     Commons.I18n.t("faceEnroll.readPurpose")
   ]
 
-  readonly property string fontFamily: Style.font.menuFamily
-  readonly property color background: Color.menu.background
-  readonly property color foreground: Color.menu.text
-  readonly property color accent: Color.menu.selectedText
-  readonly property color scrim: Color.menu.scrim
-  readonly property var borderSpec: Border.surfaceSpec("menu", "border", Color.menu.border, Math.max(1, Style.space(2)), "border-alpha")
-  readonly property int cornerRadius: Style.cornerRadius
-
   // The ring's radius on screen, and how far a turn or a tilt moves the
   // dot: a turn reading of 0.30 (about a quarter turn) reaches the ring.
   // The tilt measure is lopsided with a camera that looks up from the lid,
@@ -80,7 +74,7 @@ Item {
   property real roundSeconds: 0
   onSecondsLeftChanged: if (!root.countdown && root.secondsLeft > root.roundSeconds) root.roundSeconds = root.secondsLeft
   onRoundNoChanged: root.roundSeconds = 0
-  // The dashed circle: at the centre while the centre is learned, then
+  // The dashed circle: at the center while the center is learned, then
   // wherever the daemon walks it.
   readonly property bool showTarget: root.step === "centre" || root.step === "path" || root.step === "hold"
 
@@ -161,14 +155,6 @@ Item {
     interval: 2500
     repeat: false
     onTriggered: root.close()
-  }
-
-  readonly property var cameraScreen: {
-    var screens = Quickshell.screens
-    for (var i = 0; i < screens.length; i++) {
-      if (/^eDP/.test(String(screens[i].name))) return screens[i]
-    }
-    return screens.length > 0 ? screens[0] : null
   }
 
   PanelWindow {
@@ -300,7 +286,7 @@ Item {
             anchors.centerIn: parent
           }
 
-          // The head outline sits at the centre; the dot is the nose.
+          // The head outline sits at the center; the dot is the nose.
           Rectangle {
             width: root.ringRadius * 0.9
             height: root.ringRadius * 1.15
@@ -368,8 +354,8 @@ Item {
           Button {
             text: Commons.I18n.t("common.cancel")
             bordered: true
-            foreground: Color.polkit.textError
-            accent: Color.polkit.textError
+            foreground: Commons.Color.polkit.textError
+            accent: Commons.Color.polkit.textError
             fontFamily: root.fontFamily
             onClicked: root.control("cancel")
           }

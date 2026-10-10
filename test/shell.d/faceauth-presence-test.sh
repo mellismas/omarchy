@@ -25,13 +25,14 @@ assert(/\["\/usr\/bin\/faceauth", "presence", "mode", root\.secure \? "default" 
 assert(/visible: watching/.test(qml), 'the widget is hidden unless the daemon says the watch is on')
 assert(/root\.watching = p\.watching === true/.test(qml), 'watching is read from the daemon\'s answer')
 assert(/root\.mode = p\.mode === "secure" \? "secure" : "default"/.test(qml), 'any mode but secure reads as default')
-assert(/if \(exitCode !== 0\) root\.watching = false/.test(qml), 'a refused or failed call hides the widget')
+const onExit = qml.match(/onExited: function\(exitCode\) \{([\s\S]*?)\n    \}/)
+assert(onExit && /if \(wasSwitch\) root\.refresh\(\)\s*else root\.watching = false/.test(onExit[1]), 'a refused switch reads the state afresh; only a failed read hides the widget')
 assert(!/pkexec|floating-terminal|"sudo"/.test(qml), 'no privilege and no terminal are involved')
 
 // The poll is slow: every one is a daemon connection, and thirty seconds of
-// them during a long enrolment once used up the daemon's connection slots.
+// them during a long enrollment once used up the daemon's connection slots.
 // The chord's script refreshes the widget over IPC after a switch, so the
-// timer only has to catch a daemon restart or a change of enrolment.
+// timer only has to catch a daemon restart or a change of enrollment.
 const timer = qml.match(/Timer \{([\s\S]*?)\n  \}/)
 assert(timer, 'the widget has one poll timer')
 const interval = Number((timer[1].match(/interval: (\d+)/) || [])[1])
@@ -64,4 +65,14 @@ assert(choose, 'the menu rows call choose')
 assert(/modeProc\.command = \["\/usr\/bin\/faceauth", "presence", "mode", next\]/.test(choose[1]), 'choosing a mode sets it through faceauth')
 assert(/next === root\.mode\) return/.test(choose[1]), 'choosing the current mode changes nothing')
 assert(!/bar\.run\(/.test(qml), 'the widget runs nothing through the bar')
+
+// A camera that cannot flash its IR light cannot hold the secure mode's
+// promise. The daemon says so, and the widget then offers secure nowhere,
+// says why in the tooltip and the menu, and never asks for it (a refusal
+// would hide the widget).
+assert(/root\.secureAvailable = p\.secure_available !== false/.test(qml), 'whether secure is on offer is read from the daemon, and only an explicit false withdraws it')
+assert(/next === "secure" && !root\.secureAvailable\) return/.test(choose[1]), 'the menu never asks for secure where it is not available')
+const toggle = qml.match(/function toggle\(\) \{([\s\S]*?)\n  \}/)
+assert(toggle && /!root\.secure && !root\.secureAvailable\) return/.test(toggle[1]), 'a click never asks for secure where it is not available')
+assert(/IR light/.test(qml) && /secureAvailable \?/.test(qml), 'the tooltip and the menu say why secure is not available')
 JS

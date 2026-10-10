@@ -8,7 +8,9 @@
 # face authentication and does nothing on a machine without it. "Watching"
 # is the daemon's word for the walk-away lock being on for this user with a
 # face enrolled; anything short of that, and the chord is a silent no-op,
-# the same rule that hides the bar widget.
+# the same rule that hides the bar widget. A camera that cannot flash its IR
+# light cannot hold the secure mode's promise, and the daemon says so; the
+# chord then stays in default and says why.
 set -euo pipefail
 
 if omarchy-cmd-present faceauth; then
@@ -19,7 +21,9 @@ if omarchy-cmd-present faceauth; then
     else
       next=secure
     fi
-    if faceauth presence mode "$next" >/dev/null 2>&1; then
+    if [[ $next == "secure" && $now == *'"secure_available":false'* ]]; then
+      omarchy-notification-send -u low "$(omarchy-i18n faceauth.lockSecureUnavailableTitle)" "$(omarchy-i18n faceauth.lockSecureUnavailableBody)"
+    elif refused=$(faceauth presence mode "$next" 2>&1 >/dev/null); then
       omarchy-shell -q omarchy.faceauth.presence refresh
       if [[ $next == "secure" ]]; then
         omarchy-notification-send -u low "$(omarchy-i18n faceauth.lockSecureTitle)" "$(omarchy-i18n faceauth.lockSecureBody)"
@@ -27,7 +31,10 @@ if omarchy-cmd-present faceauth; then
         omarchy-notification-send -u low "$(omarchy-i18n faceauth.lockDefaultTitle)" "$(omarchy-i18n faceauth.lockDefaultBody)"
       fi
     else
-      omarchy-notification-send -u low "$(omarchy-i18n faceauth.lockTitle)" "$(omarchy-i18n faceauth.lockModeFailed)"
+      # The daemon says why it refused (the camera not checked yet, say);
+      # with no reason, the daemon was not there to ask.
+      refused=${refused#presence mode: }
+      omarchy-notification-send -u low "$(omarchy-i18n faceauth.lockTitle)" "${refused:-$(omarchy-i18n faceauth.lockModeFailed)}"
     fi
   fi
 fi

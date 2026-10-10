@@ -4,6 +4,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Opened by faceauthd (root) through `omarchy-shell shell summon omarchy.faceauth`
@@ -16,10 +17,13 @@ import qs.Ui
 // minute; a card no daemon has spoken to for five minutes hides itself
 // without answering, so a dead daemon leaves no card and a live request is
 // never refused by the card's own clock.
-// The card shows two lines: what is being asked, labelled by whether the
+// The card shows two lines: what is being asked, labeled by whether the
 // daemon read it from /proc itself or the requesting side relayed it, and
 // who asked, as the daemon found it in /proc.
-Item {
+// FaceAuthOverlay gives the card the menu's palette and the camera's screen:
+// the foreground for the border and title, the theme accent only where
+// something is positive (Approve, the armed note), red only for the refusal.
+FaceAuthOverlay {
   id: root
 
   property bool opened: false
@@ -27,16 +31,6 @@ Item {
   property string message: ""
   property var caller: ({})
 
-  readonly property string fontFamily: Style.font.menuFamily
-  // The menu's palette, so the card looks like the system's own windows:
-  // foreground border and title, the theme accent only where something is
-  // positive (Approve, the armed note), red only for the refusal.
-  readonly property color background: Color.menu.background
-  readonly property color foreground: Color.menu.text
-  readonly property color accent: Color.menu.selectedText
-  readonly property color scrim: Color.menu.scrim
-  readonly property var borderSpec: Border.surfaceSpec("menu", "border", Color.menu.border, Math.max(1, Style.space(2)), "border-alpha")
-  readonly property int cornerRadius: Style.cornerRadius
   // Wide enough for the passwordless row and the three answer buttons to
   // sit on their own lines without wrapping or crowding.
   readonly property int cardWidth: Math.min(Style.space(760), panel.width - Style.gapsOut * 2)
@@ -77,7 +71,7 @@ Item {
     var token = String(payload.token || "")
     // While a request is pending the window is that request's: only a
     // payload carrying its token may change what is shown or end it. The
-    // daemon serialises requests, so a summon with another token while one
+    // daemon serializes requests, so a summon with another token while one
     // is pending is not the daemon's next request; it is something of the
     // user's imitating the daemon, and it changes nothing.
     if (root.pending && token !== root.token) {
@@ -112,17 +106,6 @@ Item {
       Qt.callLater(function() { passwordField.forceActiveFocus() })
     }
     if (token.length > 0 && (fresh || riderChanged)) root.answer(["--ack"], "")
-  }
-
-  // The card is drawn on the output that holds the camera: the laptop's own
-  // panel when there is one, else the first output. A card on a screen the
-  // user is not facing is a card the user is not nodding at.
-  readonly property var cameraScreen: {
-    var screens = Quickshell.screens
-    for (var i = 0; i < screens.length; i++) {
-      if (/^eDP/.test(String(screens[i].name))) return screens[i]
-    }
-    return screens.length > 0 ? screens[0] : null
   }
 
   property string token: ""
@@ -192,7 +175,7 @@ Item {
   // request is the only consent; nothing else appears, and the daemon
   // writes the same rule and expiry timer Omarchy's own command would.
   // Only on a sudo request: polkit is not covered by the sudoers rule.
-  // The button is greyed unless the daemon says the enrolled face is in
+  // The button is grayed unless the daemon says the enrolled face is in
   // frame right now (`face_present` in the payload); the daemon refuses
   // an arm otherwise too, so the socket is no wider than the button.
   readonly property bool sudoRequest: String((root.caller || {}).via || "") === "sudo" && !/(^|[\s\/])omarchy-sudo-passwordless(\s|$)/.test(String((root.caller || {}).command || ""))
@@ -331,7 +314,7 @@ Item {
           Text {
             text: root.state === "approved" ? "󰖎" : (root.state === "denied" ? "󰅙" : "󰵃")
             textFormat: Text.PlainText
-            color: root.state === "denied" ? Color.polkit.textError : root.foreground
+            color: root.state === "denied" ? Commons.Color.polkit.textError : root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.iconLarge
             anchors.verticalCenter: parent.verticalCenter
@@ -341,7 +324,7 @@ Item {
             width: parent.width - Style.space(48)
             text: root.message
             textFormat: Text.PlainText
-            color: root.state === "denied" ? Color.polkit.textError : root.foreground
+            color: root.state === "denied" ? Commons.Color.polkit.textError : root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
             wrapMode: Text.Wrap
@@ -378,7 +361,7 @@ Item {
         }
 
         // One line: the passwordless controls on the left, set apart from
-        // the answer buttons on the right, all centred on the same axis.
+        // the answer buttons on the right, all centered on the same axis.
         Item {
           width: parent.width
           height: Math.max(passwordlessRow.implicitHeight, answerRow.implicitHeight)
@@ -409,7 +392,7 @@ Item {
 
             Button {
               visible: root.passwordlessArmed.length === 0
-              // Greyed until the daemon reports the enrolled face in frame:
+              // Grayed until the daemon reports the enrolled face in frame:
               // the person at the camera arms it, nothing else does.
               enabled: root.passwordlessMinutes.length > 0 && root.facePresent
               opacity: root.facePresent ? 1.0 : 0.4
@@ -447,8 +430,8 @@ Item {
               anchors.verticalCenter: parent.verticalCenter
               text: Commons.I18n.t("faceConsent.denyAndKill")
               bordered: true
-              foreground: Color.polkit.textError
-              accent: Color.polkit.textError
+              foreground: Commons.Color.polkit.textError
+              accent: Commons.Color.polkit.textError
               fontFamily: root.fontFamily
               onClicked: root.killRequester()
             }
