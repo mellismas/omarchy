@@ -19,6 +19,8 @@ for arg in "$@"; do
   esac
 done
 
+source "$OMARCHY_PATH/install/helpers/pam-stack.sh"
+
 if (( EUID == 0 )); then
   echo "Run omarchy-remove-security-face as your user, not under sudo (it asks for sudo where needed)." >&2
   exit 1
@@ -27,28 +29,62 @@ target_user=$USER
 marker_dir=/var/backups/faceauth
 created_marker=$marker_dir/polkit-1.created-by-faceauth
 
-# Only our line goes, as the fingerprint and FIDO2 removals do; whatever else
-# is in the stack, including lines added after setup, stays where it was.
+# Only our face line goes, as the fingerprint and FIDO2 removals do, and the
+# face daemon's key-fallback line turns back into the pam_u2f line it stood
+# for, with the same options, so the key keeps working for sudo and polkit
+# without face; whatever else is in the stack, including lines added after
+# setup, stays where it was. The edit is one of the shared PAM edits
+# (install/helpers/pam-stack.sh): the whole file replaced in one step,
+# under the machine-wide lock.
 strip_face_line() {
-  local file="$1"
+  local file="$1" status=0
   [[ -f $file ]] || return 0
-  grep -q pam_faceauth.so "$file" || return 0
-  echo "Removing face authentication from ${file##*/}..."
-  sudo sed -i '/pam_faceauth\.so/d' "$file"
+  pam_stack_needed "$file" unface "" || return 0
+  if grep -qE '^[^#]*pam_faceauth\.so.*[[:space:]]key-fallback([[:space:]]|$)' "$file"; then
+    echo "Removing face authentication from ${file##*/}; the security key goes back to its own FIDO2 line..."
+  else
+    echo "Removing face authentication from ${file##*/}..."
+  fi
+  pam_stack_place "$file" unface "" || status=$?
+  if (( status == 2 )); then
+    echo -e "\e[31m${file##*/} could not be changed as intended and was left as it was.\e[0m" >&2
+    return 1
+  fi
+}
+
+# The polkit override setup created goes whole while it still matches
+# setup's copy, checked and removed under the PAM edit lock.
+remove_created_polkit_locked() {
+  [[ -f /etc/pam.d/polkit-1 ]] && sudo cmp -s - "$created_marker" </etc/pam.d/polkit-1 || return 1
+  echo "Removing the polkit override that setup created..."
+  sudo rm -f /etc/pam.d/polkit-1 "$created_marker" || return 2
 }
 
 echo -e "\e[32mRemoving face authentication.\n\e[0m"
 
 # PAM first, always, whatever else is chosen: dropping the module while the
-# stacks reference it would leave them unable to authenticate.
+# stacks reference it would leave them unable to authenticate. The lock
+# screen's key lane goes first of all: it is the daemon's own line, and
+# FIDO2 setup writes it only while face is set up.
+if [[ -e /etc/pam.d/omarchy-lock-fido2 || -L /etc/pam.d/omarchy-lock-fido2 ]]; then
+  echo "Removing the lock screen's security key lane, which runs through face authentication..."
+  pam_stack_remove /etc/pam.d/omarchy-lock-fido2
+fi
 strip_face_line /etc/pam.d/sudo
-if sudo test -f "$created_marker" && [[ -f /etc/pam.d/polkit-1 ]] && sudo cmp -s - "$created_marker" </etc/pam.d/polkit-1; then
-  # Setup created this override and nothing has touched it since: deleting it
-  # returns polkit to the vendor stack. The marker is the copy setup kept of
-  # what it wrote; a marker from an older setup is empty and never matches.
-  echo "Removing the polkit override that setup created..."
-  sudo rm -f /etc/pam.d/polkit-1 "$created_marker"
-else
+# Setup created polkit's override and nothing has touched it since:
+# deleting it returns polkit to the vendor stack. The marker is the copy
+# setup kept of what it wrote; a marker from an older setup is empty and
+# never matches.
+polkit_status=1
+if sudo test -f "$created_marker" && [[ -f /etc/pam.d/polkit-1 ]]; then
+  polkit_status=0
+  pam_stack_locked remove_created_polkit_locked || polkit_status=$?
+fi
+if (( polkit_status == 2 )); then
+  echo -e "\e[31mThe polkit override setup created could not be removed.\e[0m" >&2
+  exit 1
+fi
+if (( polkit_status == 1 )); then
   # Either setup found a file here, or the one it created has since gained
   # lines of its own (a fingerprint or FIDO2 setup inserts into the same
   # file). Only our line goes; the file stays for whatever else is in it now,
@@ -60,7 +96,7 @@ fi
 if sudo test -d "$marker_dir"; then sudo rmdir "$marker_dir" 2>/dev/null || true; fi
 if [[ -f /etc/pam.d/omarchy-lock-face ]]; then
   echo "Removing lock screen face authentication..."
-  sudo rm -f /etc/pam.d/omarchy-lock-face
+  pam_stack_remove /etc/pam.d/omarchy-lock-face
 fi
 
 # The daemon deletes the templates when it is running, so its cache goes with
@@ -85,6 +121,29 @@ else
   fi
   if (( templates_left )); then
     echo -e "\e[31mThe enrolled templates could not be deleted; they are still under /var/lib/faceauth (root-only).\e[0m" >&2
+  fi
+fi
+
+# The IR capture node's lock went on with setup, so it comes off here. With
+# the rule gone, faceauth gives the node it checks back what udev and logind
+# give a capture node (root's, the video group's, no ACL: the lock's mode had
+# shut the seat user's ACL entry, and uaccess never redoes an entry already
+# there), then add events replay the video nodes, since 50-udev-default.rules
+# sets their group on add alone, and uaccess writes the seat user's access
+# afresh. Doctor then reads the node; a lock it still finds is said, and the
+# removal goes on.
+ir_rule_file=/etc/udev/rules.d/72-faceauth-ir-node.rules
+if sudo test -f "$ir_rule_file"; then
+  if sudo rm -f -- "$ir_rule_file" && sudo udevadm control --reload; then
+    sudo faceauth cam ir-reset >/dev/null || true
+    if sudo udevadm trigger --action=add --subsystem-match=video4linux && sudo udevadm settle --timeout=10; then
+      ir_left=$(sudo faceauth doctor --json 2>/dev/null | jq -r '.[] | select(.id == "camera.ir_capture" and .status == "fail") | .detail' 2>/dev/null) || true
+      [[ -z ${ir_left:-} ]] || echo -e "\e[31mThe infrared capture node is still locked: $ir_left\e[0m" >&2
+    else
+      echo "The infrared capture node's events could not be replayed; replug the camera or reboot to open it." >&2
+    fi
+  else
+    echo "The infrared capture node's lock could not be taken off; delete $ir_rule_file by hand." >&2
   fi
 fi
 

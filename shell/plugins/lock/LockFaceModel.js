@@ -62,6 +62,25 @@ function parseProbe(text) {
 // probe: "no-face", "not-scannable" (too far to judge), "not-likely" or
 // "not-attentive" (turned away: the owner working at another screen reads as
 // likely, and a full scan of that pose misses).
+// The answer to `faceauth key-lane`: true or false from the daemon's
+// well-formed key_lane reply; "down" when the CLI found no daemon at all
+// (its socket missing, or nothing listening on it); and null for anything
+// else (no reply, a busy or failing daemon, garbage), which changes
+// nothing: once offered, the lane stays for the whole lock, and only the
+// daemon's own "not available" or "down" takes it away.
+function parseKeyLane(text) {
+  var info = null
+  try {
+    info = JSON.parse(String(text || ""))
+  } catch (e) {
+    return null
+  }
+  if (!info || typeof info !== "object" || Array.isArray(info)) return null
+  if (info.result === "not_running") return "down"
+  if (info.result !== "key_lane" || typeof info.available !== "boolean") return null
+  return info.available
+}
+
 function probeAction(reply) {
   if (!reply || !reply.face) return "no-face"
   if (!reply.scannable) return "not-scannable"
@@ -76,6 +95,7 @@ if (typeof module !== "undefined") {
     cadenceFrom: cadenceFrom,
     cadenceSeconds: cadenceSeconds,
     parseProbe: parseProbe,
+    parseKeyLane: parseKeyLane,
     probeAction: probeAction
   }
 }

@@ -89,6 +89,21 @@ output=$(shell_call shell summon "$(printf 'a\x1fb')")
 [[ $output == "from-qs" && ! -s $requests ]] || fail "an argument holding a separator goes straight to qs ipc" "got: $output"
 pass "an argument holding a separator goes straight to qs ipc"
 
+# -s: the last argument comes from stdin and goes over the socket alone. A
+# call the socket cannot carry fails rather than hand the argument to qs ipc,
+# whose argv any process can read.
+printf 'ok' >"$mode"
+: >"$requests"
+output=$(printf '{"token":"0123abcd"}' | shell_call -s shell summon omarchy.faceauth)
+[[ $output == 'answer to shell summon omarchy.faceauth {"token":"0123abcd"}' && ! -s $calls ]] || fail "-s sends stdin as the last argument over the socket" "got: $output"
+[[ $(tail -n1 "$requests") == 'shell|summon|omarchy.faceauth|{"token":"0123abcd"}' ]] || fail "the stdin argument is its own field" "got: $(tail -n1 "$requests")"
+printf 'skip' >"$mode"
+shell_call -s shell summon omarchy.faceauth <<<'{"token":"0123abcd"}' >/dev/null 2>&1 && fail "-s fails when the shell ran nothing"
+[[ ! -s $calls ]] || fail "-s never falls back to qs ipc"
+printf 'ok' >"$mode"
+shell_call -s -q shell summon omarchy.faceauth <<<'{"a":1}' >/dev/null || fail "-s combines with -q"
+pass "-s reads the last argument from stdin and sends it over the socket only"
+
 printf 'hang' >"$mode"
 output=$(IPC_TIMEOUT=0.5s shell_call shell ping 2>&1) && fail "a shell that never replies fails the call"
 [[ $output == "omarchy-shell is not responding" && ! -s $calls ]] ||

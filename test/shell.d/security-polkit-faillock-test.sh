@@ -15,8 +15,12 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 for setup in omarchy-setup-security-fingerprint omarchy-setup-security-fido2; do
   script="$ROOT/bin/$setup"
 
-  # Pull the here-doc body the setup writes to /etc/pam.d/polkit-1.
+  # Pull the here-doc body the setup writes to /etc/pam.d/polkit-1, or the
+  # stack FIDO2 setup hands the shared PAM helper to create it with.
   body=$(sed -n "/tee \/etc\/pam.d\/polkit-1/,/^EOF\$/p" "$script")
+  if [[ -z $body ]] && grep -q 'pam_stack_create /etc/pam.d/polkit-1 "$fido2_polkit_stack"' "$script"; then
+    body=$(sed -n "/^fido2_polkit_stack='/,/'\$/p" "$script" | sed "s/^fido2_polkit_stack='//; s/'\$//")
+  fi
 
   [[ -n $body ]] || fail "$setup writes a polkit-1 stack"
 

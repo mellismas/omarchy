@@ -18,7 +18,7 @@ const enShell = JSON.parse(fs.readFileSync(path.join(root, 'default/i18n/en/shel
 const layerRules = fs.readFileSync(path.join(root, 'default/hypr/apps/omarchy-shell.lua'), 'utf8')
 
 assert(!/--token/.test(consent), 'the consent window never puts the token on argv')
-assert(/answerProc\.lines = \[root\.token\]/.test(consent), 'the token is the first stdin line of the answer')
+assert(/lines: \[root\.token\]\.concat\(secret\.length > 0 \? \[secret\] : \[\]\)/.test(consent), 'the token is the first stdin line of the answer')
 assert(/"\/usr\/bin\/faceauth", "consent-answer"/.test(consent), 'the answer goes to consent-answer')
 
 const commands = [...consent.matchAll(/command\s*[=:]\s*\[\s*"([^"]*)"/g)].map(m => m[1])
@@ -40,7 +40,11 @@ assert(/readonly property string passwordlessArmed: root\.riderMinutes > 0 \? St
 assert(/root\.riderMinutes = Number\(payload\.passwordless_minutes \|\| 0\)/.test(consent), 'open() reads the rider from payload.passwordless_minutes')
 assert(/root\.facePresent = payload\.face_present === true/.test(consent), 'open() reads the face from payload.face_present, true only when the daemon says so')
 assert(/var riderChanged = Number\(payload\.passwordless_minutes \|\| 0\) !== root\.riderMinutes/.test(consent), 'a payload that changes the rider is noticed')
-assert(/if \(token\.length > 0 && \(fresh \|\| riderChanged\)\) root\.answer\(\["--ack"\], ""\)/.test(consent), 'a changed rider is acknowledged afresh, so the daemon starts the dwell over')
+assert(/if \(token\.length > 0 && \(fresh \|\| riderChanged \|\| payload\.ack_wanted === true\)\) root\.answer\(\["--ack"\], ""\)/.test(consent), 'a changed rider is acknowledged afresh, so the daemon starts the dwell over')
+// Round 3's 3: the card coming back after the unlock is the same request
+// on screen, so it is not fresh; the daemon dropped its old acknowledgment
+// and asks for a new one in the payload, and the card gives it once drawn.
+assert(/payload\.ack_wanted === true/.test(consent), 'the card acknowledges a payload that asks for it, even for a request it already showed')
 // The control is grayed and unclickable unless the enrolled face is on screen.
 const plButton = consent.split(/\bButton \{/).slice(1).find(b => /faceConsent\.passwordlessFor/.test(b))
 assert(plButton, 'the card has the passwordless button')
@@ -177,6 +181,41 @@ assert(readyButton, 'the card has a Ready to nod button')
 assert(/visible: root\.pending && root\.waiting/.test(readyButton), 'the button shows only while the daemon waits for a re-arm')
 assert(/onClicked: root\.readyToNod\(\)/.test(readyButton), 'the button calls readyToNod')
 
+// The security key: the daemon asks it alongside the nod and says so in the
+// payload. The card only shows that a touch works; it sends nothing for the
+// key, so no process can answer for it through the card, and a touch ends in
+// the daemon's own approved payload, which closes the card as a nod's does.
+assert(/root\.keyArmed = payload\.key_armed === true/.test(open[1]), 'open() reads the key from payload.key_armed, true only when the daemon says so')
+assert(!/root\.keyArmed = (?!payload\.key_armed === true)/.test(consent), 'nothing but the payload sets keyArmed')
+const keyBlock = blocks.find(block => /id: keyHint/.test(block)) || ''
+assert(keyBlock, 'the card has a key line')
+assert(/visible: root\.pending && root\.keyArmed/.test(keyBlock), 'the key line shows only on a pending request the daemon armed the key for')
+assert(/text: root\.keyHintText/.test(keyBlock), 'the key line says what the key needs')
+assert(/\? Commons\.I18n\.t\("faceConsent\.keyTouch"\)/.test(consent) && enShell['faceConsent.keyTouch'] === 'Or touch your security key to allow this.', 'without a PIN the key line says a touch allows the request')
+// E: a key line that asks for a PIN gets a masked field of its own, shown
+// only while the daemon armed the key on a PIN lane. The PIN goes to the
+// daemon as the password does: on stdin after the token, never on argv, and
+// the field is cleared as it goes and on a new request.
+assert(/root\.keyPin = payload\.key_pin === true/.test(open[1]), 'open() reads the PIN lane from payload.key_pin, true only when the daemon says so')
+assert(!/root\.keyPin = (?!payload\.key_pin === true)/.test(consent), 'nothing but the payload sets keyPin')
+const pinField = consent.split(/\bTextField \{/).slice(1).find(b => /id: keyPinField/.test(b)) || ''
+assert(pinField, 'the card has a key PIN field')
+assert(/visible: root\.pending && root\.keyArmed && root\.keyPin/.test(pinField), 'the PIN field shows only on a pending request with the key armed on a PIN lane')
+assert(/password: true/.test(pinField), 'the PIN field is masked')
+assert(/onAccepted: root\.submitKeyPin\(\)/.test(pinField), 'Enter in the PIN field sends the PIN')
+const submitPin = consent.match(/function submitKeyPin\(\) \{([\s\S]*?)\n  \}/)
+assert(submitPin, 'the card has a submitKeyPin function')
+assert(/if \(pin\.length === 0 \|\| !root\.pending \|\| !root\.keyArmed \|\| !root\.keyPin\) return/.test(submitPin[1]), 'it sends nothing unless the daemon asked for a PIN on a pending request')
+assert(/keyPinField\.text = ""/.test(submitPin[1]), 'the field is cleared as the PIN goes')
+assert(/root\.answer\(\["--key-pin"\], pin\)/.test(submitPin[1]), 'the PIN goes as the secret line of an answer, after the token, never on argv')
+const freshBlock = open[1].match(/if \(fresh\) \{([\s\S]*?)\n    \}/)
+assert(freshBlock && /keyPinField\.text = ""/.test(freshBlock[1]), 'a new request clears the PIN field')
+assert(/if \(payload\.key_pin_wanted === true\) root\.keyPinSent = false/.test(open[1]), 'the card asks for the PIN again whenever the daemon says one is wanted')
+assert(/root\.keyPinSent \? Commons\.I18n\.t\("faceConsent\.keyTouchNow"\) : Commons\.I18n\.t\("faceConsent\.keyPinThenTouch"\)/.test(consent) && enShell['faceConsent.keyTouchNow'] === 'Now touch your security key.' && enShell['faceConsent.keyPinThenTouch'] === "Or type your security key's PIN, then touch the key.", 'it says to touch the key only while a PIN it sent is in use')
+assert(/textFormat: Text\.PlainText/.test(keyBlock) && /font\.pixelSize: Style\.font\.caption/.test(keyBlock), 'the key line is plain caption text')
+assert(!/--key(?!-pin")/.test(consent), 'the card sends no key approval, only the key PIN when asked for one')
+assert(/autoClose\.interval = root\.state === "approved" \? 700 : 300000/.test(open[1]), 'an approval, by key or nod, fades the card the same way')
+
 // The card is drawn on the output that holds the camera, chosen once for
 // both face overlays in FaceAuthOverlay.
 const overlay = fs.readFileSync(path.join(root, 'shell/Ui/FaceAuthOverlay.qml'), 'utf8')
@@ -184,4 +223,83 @@ const panelBlock = consent.split(/\bPanelWindow \{/)[1] || ''
 assert(/^FaceAuthOverlay \{\n  id: root$/m.test(consent), 'the card is a FaceAuthOverlay')
 assert(/screen: root\.cameraScreen/.test(panelBlock), 'the card is bound to the camera screen')
 assert(/\/\^eDP\/\.test\(String\(screens\[i\]\.name\)\)/.test(overlay), 'the camera screen is the built-in panel when there is one')
+
+// Fix round 14 (Codex 3): successive answers each reach consent-answer with
+// their own stdin. This runs the card's own answer code (its `answer` and,
+// when there is one, `nextAnswer` function, and answerProc's handlers, all
+// taken from the QML) against a model of Quickshell 0.3.2's Process
+// (src/io/process.cpp): `stdinEnabled` belongs to the object, not to one
+// launch (setStdinEnabled); a launch made with it off has its write channel
+// closed from the start (startProcessIfReady); `running = true` while a
+// launch runs only marks the next one, which starts, with whatever command
+// is set then, when the running one ends (setRunning, startProcessIfReady,
+// onFinished); `started` comes after `running` is set, not within it
+// (QProcess::started); and a write reaches the child only while its stdin
+// is open. The cards: one's acknowledgment and a PIN typed at once, a PIN
+// retried, then the next card's acknowledgment.
+{
+  const fnOf = (name) => {
+    const m = consent.match(new RegExp('\\n  function ' + name + '\\(([^)]*)\\) \\{([\\s\\S]*?)\\n  \\}'))
+    return m ? { params: m[1], body: m[2] } : null
+  }
+  const procBlock = consent.match(/\n  Process \{\n    id: answerProc\n([\s\S]*?)\n  \}/)
+  assert(procBlock, 'the card has its answer Process')
+  const handlerOf = (name) => {
+    const m = procBlock[1].match(new RegExp('    ' + name + ': \\{([\\s\\S]*?)\\n    \\}'))
+    return m ? m[1] : null
+  }
+  const events = []
+  const Qt = { callLater: (f) => events.push(f) }
+  const launches = []
+  const proc = {
+    lines: [],
+    _command: [], _stdin: /stdinEnabled: true/.test(procBlock[1]), _target: false, current: null,
+    get command() { return this._command },
+    set command(v) { if (JSON.stringify(v) === JSON.stringify(this._command)) return; this._command = v.slice(); this._start() },
+    get stdinEnabled() { return this._stdin },
+    set stdinEnabled(v) { if (v === this._stdin) return; this._stdin = v; if (!v && this.current) this.current.stdinOpen = false },
+    get running() { return this.current !== null },
+    set running(v) { this._target = v; if (v) this._start() },
+    _start() {
+      if (this.current || !this._target || this._command.length === 0) return
+      this._target = false
+      this.current = { args: this._command.slice(2), stdinOpen: this._stdin, got: '' }
+      launches.push(this.current)
+      events.push(() => this._handle('onStarted'))
+    },
+    write(data) { if (this.current && this.current.stdinOpen) this.current.got += data },
+    _handle(name) {
+      const body = handlerOf(name)
+      if (body === null) return
+      // The QML handler's scope: the Process's own properties, then the card's.
+      new Function('proc', 'root', 'answerProc', 'Qt', 'with (proc) {' + body + '}')(this, card, this, Qt)
+    },
+    _finish() {
+      this.current = null
+      this._handle('onExited')
+      this._handle('onRunningChanged')
+      this._start()
+    },
+  }
+  const card = { token: '', answerQueue: [] }
+  for (const name of ['answer', 'nextAnswer']) {
+    const f = fnOf(name)
+    if (f) card[name] = new Function('root', 'answerProc', 'Qt', 'return function(' + f.params + ') {' + f.body + '}')(card, proc, Qt)
+  }
+  const drain = () => { while (events.length > 0) events.shift()() }
+  const answered = () => { drain(); while (proc.current) { proc._finish(); drain() } }
+  card.token = 'A'
+  card.answer(['--ack'], '')
+  card.answer(['--key-pin'], '1234')
+  answered()
+  card.answer(['--key-pin'], '5678')
+  answered()
+  card.token = 'B'
+  card.answer(['--ack'], '')
+  answered()
+  const seen = launches.map(l => l.args.join(' ') + ' <- ' + JSON.stringify(l.got))
+  const want = ['--ack <- "A\\n"', '--key-pin <- "A\\n1234\\n"', '--key-pin <- "A\\n5678\\n"', '--ack <- "B\\n"']
+  assert(JSON.stringify(seen) === JSON.stringify(want), 'every answer reaches its own consent-answer with its token and its PIN, one after another', JSON.stringify(seen, null, 1))
+  assert(launches.every(l => !l.stdinOpen), 'each answer\'s stdin is closed after its lines, so consent-answer reads to its end')
+}
 JS

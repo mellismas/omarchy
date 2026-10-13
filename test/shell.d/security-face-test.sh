@@ -24,8 +24,12 @@ calls="$test_tmp/calls.log"
 pamd="$test_tmp/pam.d"
 backups="$test_tmp/backups"
 store="$test_tmp/store"
+udev="$test_tmp/udev.rules.d"
 out="$test_tmp/out.log"
-mkdir -p "$stub_bin" "$pamd" "$backups" "$store"
+mkdir -p "$stub_bin" "$pamd" "$backups" "$store" "$udev"
+# Every run maps /etc/udev/rules.d into the scratch tree, whichever runner
+# starts it.
+export TEST_UDEV="$udev"
 
 cleanup() {
   rm -rf "$test_tmp"
@@ -49,21 +53,31 @@ printf '\n' >>"$TEST_LOG"
 # The stub maps every path under /etc/pam.d, /var/backups/faceauth or
 # /var/lib/faceauth into it as well, so a path the retarget missed still never
 # reaches the host.
-map() { local p=$1; p=${p/#\/etc\/pam.d/$TEST_PAMD}; p=${p/#\/var\/backups\/faceauth/$TEST_BACKUPS}; p=${p/#\/var\/lib\/faceauth/$TEST_STORE}; printf '%s' "$p"; }
+map() { local p=$1; p=${p/#\/etc\/pam.d/$TEST_PAMD}; p=${p/#\/var\/backups\/faceauth/$TEST_BACKUPS}; p=${p/#\/var\/lib\/faceauth/$TEST_STORE}; p=${p/#\/etc\/udev\/rules.d/$TEST_UDEV}; printf '%s' "$p"; }
 
 case "${1:-}" in
   tee)
     /usr/bin/cat >"$(map "$2")"
     ;;
   rm)
+    # Setup and removal replace and remove whole files (install, then mv;
+    # rm); no stack is edited in place.
     shift; args=(); for a in "$@"; do [[ $a == -* ]] && args+=("$a") || args+=("$(map "$a")"); done
     /usr/bin/rm "${args[@]}"
     ;;
-  sed)
-    # Setup inserts at line 1 or after a fingerprint or FIDO2 line; removal
-    # and a replaced hand-edited line delete by pattern. Nothing else.
-    [[ $2 == -i && ( $3 =~ ^([0-9]+[ai]) || $3 == '/pam_faceauth\.so/d' ) ]] || { echo "unexpected sed: $*" >&2; exit 97; }
-    /usr/bin/sed -i "$3" "$(map "$4")"
+  mktemp)
+    # A stack's stage of its own, made beside it.
+    [[ $# == 2 && ${2##*/} == .*.omarchy.XXXXXX ]] || { echo "unexpected mktemp: $*" >&2; exit 97; }
+    /usr/bin/mktemp "$(map "$2")"
+    ;;
+  mv)
+    [[ $2 == -Tf && $3 == -- ]] || { echo "unexpected mv: $*" >&2; exit 97; }
+    /usr/bin/mv -Tf -- "$(map "$4")" "$(map "$5")"
+    ;;
+  echo)
+    # FIDO2 setup's closing test of sudo.
+    shift
+    printf '%s\n' "$*"
     ;;
   test)
     [[ $2 == -f || $2 == -d ]] || { echo "unexpected test: $*" >&2; exit 97; }
@@ -82,8 +96,20 @@ case "${1:-}" in
     /usr/bin/cmp -s - "$(map "$4")"
     ;;
   install)
-    [[ $2 == -dm700 ]] || { echo "unexpected install: $*" >&2; exit 97; }
-    /usr/bin/install -dm700 "$(map "$3")"
+    # The marker directory, or a stack's root-owned copy written from stdin
+    # beside the stack it replaces. TEST_INSTALL_FAIL makes the copy fail.
+    if [[ $2 == -dm700 ]]; then
+      /usr/bin/install -dm700 "$(map "$3")"
+    elif [[ "$2 $3 $4 $5 $6 $7 $8 $9" == "-m 644 -o root -g root -T /dev/stdin" ]] && (( $# == 10 )); then
+      (( ${TEST_INSTALL_FAIL:-0} == 0 )) || exit 1
+      [[ -z ${TEST_INSTALL_FAIL_FOR:-} || ${10##*/} != ".${TEST_INSTALL_FAIL_FOR}.omarchy."* ]] || exit 1
+      [[ ${10##*/} == .*.omarchy.?????? ]] || { echo "unexpected install target: ${10}" >&2; exit 97; }
+      [[ -z ${TEST_INSTALL_SLOW:-} ]] || sleep "$TEST_INSTALL_SLOW"
+      /usr/bin/cat >"$(map "${10}")"
+    else
+      echo "unexpected install: $*" >&2
+      exit 97
+    fi
     ;;
   rmdir)
     /usr/bin/rmdir "$(map "$2")"
@@ -92,16 +118,50 @@ case "${1:-}" in
     /usr/bin/cp -p "$(map "$3")" "$(map "$4")"
     ;;
   touch)
+    printf 'touch-umask\t%s\n' "$(umask)" >>"$TEST_LOG"
     /usr/bin/touch "$(map "$2")"
+    ;;
+  chown)
+    # The PAM edit lock: root:wheel, which the stat stub then reports.
+    [[ $2 == root:wheel && $3 == */pam-stack.lock ]] || { echo "unexpected chown: $*" >&2; exit 97; }
+    : >"$3.chowned"
+    ;;
+  chmod)
+    [[ $2 == 0640 && $3 == */pam-stack.lock ]] || { echo "unexpected chmod: $*" >&2; exit 97; }
+    (( ${TEST_CHMOD_FAIL:-0} == 0 )) || exit 1
+    /usr/bin/chmod 0640 "$3"
     ;;
   faceauth|systemctl)
     exec "$@"
+    ;;
+  udevadm)
+    # Reloading the rules, replaying the video nodes' change events (setup)
+    # or add events (removal), and waiting for them: logged above, nothing
+    # else.
+    [[ $2 == control && $3 == --reload || $2 == trigger && ( $3 == --action=change || $3 == --action=add ) && $4 == --subsystem-match=video4linux || $2 == settle && $3 == --timeout=10 ]] || { echo "unexpected udevadm: $*" >&2; exit 97; }
     ;;
   *)
     echo "unexpected sudo invocation: $*" >&2
     exit 97
     ;;
 esac
+SH
+
+# The PAM edit lock is checked to be root:wheel 0640 on every use; a test
+# cannot make a file root's, so the owner and group come from the chown the
+# sudo stub recorded, and the mode is the file's own.
+cat >"$stub_bin/stat" <<'SH'
+#!/bin/bash
+
+if [[ ${1:-} == -c && ${2:-} == '%u:%G:%a' && ${3:-} == -- && ${4:-} == */pam-stack.lock ]]; then
+  if [[ -e $4.chowned ]]; then
+    printf '0:wheel:%s\n' "$(/usr/bin/stat -c %a -- "$4")"
+  else
+    /usr/bin/stat -c '%u:%G:%a' -- "$4"
+  fi
+  exit
+fi
+exec /usr/bin/stat "$@"
 SH
 
 cat >"$stub_bin/faceauth" <<'SH'
@@ -114,14 +174,38 @@ printf '\n' >>"$TEST_LOG"
 case "${1:-}" in
   enroll) [[ $TEST_ENROLL == ok ]] ;;
   calibrate) : ;;
+  cam)
+    # `cam ir-reset`: the node given back once its rule is gone.
+    if [[ ${2:-} == ir-reset ]]; then
+      echo "/dev/video1 given back: root, group 985, mode 0660, no ACL; an add event has udev write the seat user's access"
+      exit 0
+    fi
+    # `cam ir-rule`: the rule that locks the IR capture node, or, with
+    # TEST_IR_RULE=open, the reason it is left open and exit 3.
+    [[ ${2:-} == ir-rule ]] || exit 2
+    if [[ ${TEST_IR_RULE:-rule} == open ]]; then
+      echo "the IR capture node is left open: /dev/video1 offers colour formats too (YUYV), so it may be a webcam's" >&2
+      exit 3
+    fi
+    if [[ ${TEST_IR_RULE:-rule} == usb ]]; then
+      # A USB camera's rule: the interface marked, then the camera locked.
+      printf '%s\n' 'ACTION!="remove", SUBSYSTEM=="video4linux", KERNEL=="video*", ATTR{index}=="0", SUBSYSTEMS=="usb", KERNELS=="1-5:1.2", ENV{FACEAUTH_IR_NODE}="1"' \
+        'ACTION!="remove", SUBSYSTEM=="video4linux", KERNEL=="video*", ENV{FACEAUTH_IR_NODE}=="1", SUBSYSTEMS=="usb", KERNELS=="1-5", ATTRS{idVendor}=="04f2", ATTRS{idProduct}=="b6dd", TAG-="uaccess", GROUP="root", MODE="0600"'
+      exit 0
+    fi
+    printf '%s\n' 'ACTION!="remove", SUBSYSTEM=="video4linux", KERNEL=="video*", ATTR{name}=="ipu3-cio2 1", SUBSYSTEMS=="pci", KERNELS=="0000:00:14.3", TAG-="uaccess", GROUP="root", MODE="0600"'
+    ;;
   doctor)
     # The rows setup reads, in the daemon's --json shape. TEST_DOCTOR picks
     # which of the two camera rows fails; the real doctor exits 1 on a fail
     # row and still prints every row, so the stub does the same.
-    ir=pass; illuminator=pass; rc=0
+    # TEST_DOCTOR=ir-capture-fail: the IR capture node still locked once
+    # its rule is gone (removal reads this row).
+    ir=pass; illuminator=pass; capture=info; capture_detail="left open"; rc=0
     [[ ${TEST_DOCTOR:-pass} == ir-fail ]] && { ir=fail; rc=1; }
     [[ ${TEST_DOCTOR:-pass} == illuminator-warn ]] && illuminator=warn
-    printf '[\n  {"id": "camera.ir", "status": "%s", "detail": "ov7251 3-0060 on /dev/video2 (640x480)"},\n  {"id": "camera.illuminator", "status": "%s", "detail": "no strobe control"},\n  {"id": "camera.rgb", "status": "pass", "detail": "ov8865 3-0010"}\n]\n' "$ir" "$illuminator"
+    [[ ${TEST_DOCTOR:-pass} == ir-capture-fail ]] && { capture=fail; capture_detail="/dev/video1 is still locked though no rule holds it"; rc=1; }
+    printf '[\n  {"id": "camera.ir", "status": "%s", "detail": "ov7251 3-0060 on /dev/video2 (640x480)"},\n  {"id": "camera.illuminator", "status": "%s", "detail": "no strobe control"},\n  {"id": "camera.rgb", "status": "pass", "detail": "ov8865 3-0010"},\n  {"id": "camera.ir_capture", "status": "%s", "detail": "%s"}\n]\n' "$ir" "$illuminator" "$capture" "$capture_detail"
     exit $rc
     ;;
   auth)
@@ -198,6 +282,12 @@ IFS='|' read -ra answers <<<"$TEST_GUM"
 printf '%s\n' "${answers[$n]}"
 SH
 
+cat >"$stub_bin/fido2-token" <<'SH'
+#!/bin/bash
+
+echo '/dev/hidraw0: vendor=0x1050, product=0x0407 (Yubico YubiKey)'
+SH
+
 chmod +x "$stub_bin"/*
 ln -s "$ROOT/bin/omarchy-cmd-missing" "$stub_bin/omarchy-cmd-missing"
 
@@ -210,11 +300,31 @@ occurrences=$(grep -c '/etc/pam.d/omarchy-lock-face' "$setup") || occurrences=0
 occurrences=$(grep -c '/etc/pam.d/omarchy-lock-face' "$remove") || occurrences=0
 (( occurrences == 2 )) || fail "removal names the lock-face PAM service exactly twice (the check and the rm)" "found $occurrences occurrences"
 retarget() {
-  sed -e "s|/etc/pam.d|$pamd|g" -e "s|/var/backups/faceauth|$backups|g" -e "s|/var/lib/faceauth|$store|g" "$1"
+  sed -e "s|/etc/pam.d|$pamd|g" -e "s|/var/backups/faceauth|$backups|g" -e "s|/var/lib/faceauth|$store|g" -e "s|/etc/udev/rules.d|$udev|g" "$1"
 }
+# The machine-wide PAM edit lock the shared helper takes is retargeted the
+# same way: the scripts source a copy of the helper, from a scratch tree,
+# whose lock is a scratch file.
+helper="$ROOT/install/helpers/pam-stack.sh"
+occurrences=$(grep -Fxc 'pam_stack_lock=/run/omarchy-pam-stack.lock' "$helper") || occurrences=0
+(( occurrences == 1 )) || fail "the helper names its lock exactly once" "found $occurrences occurrences"
+omarchy_tree="$test_tmp/omarchy"
+mkdir -p "$omarchy_tree/install/helpers"
+sed -e "s|^pam_stack_lock=/run/omarchy-pam-stack.lock$|pam_stack_lock=$test_tmp/pam-stack.lock|" "$helper" >"$omarchy_tree/install/helpers/pam-stack.sh"
 setup_copy="$test_tmp/setup.sh"; retarget "$setup" >"$setup_copy"
 remove_copy="$test_tmp/remove.sh"; retarget "$remove" >"$remove_copy"
-! grep -qE '/etc/pam\.d|/var/backups/faceauth|/var/lib/faceauth' "$setup_copy" "$remove_copy" || fail "the retargeted copies name no real path"
+! grep -qE '/etc/pam\.d|/var/backups/faceauth|/var/lib/faceauth|/etc/udev' "$setup_copy" "$remove_copy" || fail "the retargeted copies name no real path"
+# FIDO2 setup writes the same two stacks. Its copy finds a key already
+# registered in a scratch key file, so it goes straight to the PAM lines;
+# only its key file paths and /etc/pam.d are retargeted, and the PAM line
+# itself still names /etc/fido2/fido2.
+fido2="$ROOT/bin/omarchy-setup-security-fido2"
+fido2_dir="$test_tmp/fido2"
+mkdir -p "$fido2_dir"
+echo "$USER:credential-handle,public-key,es256,+presence" >"$fido2_dir/fido2"
+fido2_copy="$test_tmp/fido2.sh"
+retarget "$fido2" | sed -e "s|^authdir=/etc/fido2$|authdir=$fido2_dir|" -e "s|^authfile=/etc/fido2/fido2$|authfile=$fido2_dir/fido2|" >"$fido2_copy"
+! grep -q '/etc/pam\.d' "$fido2_copy" && grep -q "^authfile=$fido2_dir/fido2$" "$fido2_copy" || fail "the FIDO2 copy is retargeted at the scratch tree"
 pass "the scripts name the PAM service as expected, and the test drives retargeted copies"
 
 run_script() {
@@ -225,8 +335,15 @@ run_script() {
   : >"$calls"
   # keep_pam=1 leaves the sudo stack as the previous run left it.
   (( ${keep_pam:-0} )) || printf 'auth include system-auth\n' >"$pamd/sudo"
-  TEST_LOG="$calls" TEST_PAMD="$pamd" TEST_BACKUPS="$backups" TEST_STORE="$store" TEST_CAMERA="$camera" TEST_ENROLL="$enroll" TEST_AUTH="$auth" \
-    TEST_DOCTOR="${doctor:-pass}" PATH="$stub_bin:$PATH" bash "$script" "$@" </dev/null >"$out" 2>&1
+  TEST_LOG="$calls" TEST_PAMD="$pamd" TEST_BACKUPS="$backups" TEST_STORE="$store" TEST_UDEV="$udev" TEST_IR_RULE="${ir_rule:-rule}" TEST_CAMERA="$camera" TEST_ENROLL="$enroll" TEST_AUTH="$auth" \
+    TEST_DOCTOR="${doctor:-pass}" TEST_INSTALL_FAIL="${TEST_INSTALL_FAIL:-0}" TEST_INSTALL_FAIL_FOR="${TEST_INSTALL_FAIL_FOR:-}" OMARCHY_PATH="$omarchy_tree" XDG_RUNTIME_DIR="$test_tmp" PATH="$stub_bin:$PATH" bash "$script" "$@" </dev/null >"$out" 2>&1
+}
+
+# FIDO2 setup against the stacks as they stand.
+run_fido2() {
+  : >"$calls"
+  TEST_LOG="$calls" TEST_PAMD="$pamd" TEST_BACKUPS="$backups" TEST_STORE="$store" \
+    OMARCHY_PATH="$omarchy_tree" XDG_RUNTIME_DIR="$test_tmp" PATH="$stub_bin:$PATH" bash "$fido2_copy" </dev/null >"$out" 2>&1
 }
 
 # Setup on the good path with a terminal on stdin, as the menu's floating
@@ -236,7 +353,7 @@ run_setup_tty() {
   rm -f "$calls.gum"
   printf 'auth include system-auth\n' >"$pamd/sudo"
   TEST_LOG="$calls" TEST_PAMD="$pamd" TEST_BACKUPS="$backups" TEST_STORE="$store" TEST_CAMERA=present TEST_ENROLL=ok TEST_AUTH=match \
-    TEST_DOCTOR=pass TEST_GUM="$1" PATH="$stub_bin:$PATH" script -qec "bash '$setup_copy'" /dev/null </dev/null >"$out" 2>&1
+    TEST_DOCTOR=pass TEST_GUM="$1" OMARCHY_PATH="$omarchy_tree" XDG_RUNTIME_DIR="$test_tmp" PATH="$stub_bin:$PATH" script -qec "bash '$setup_copy'" /dev/null </dev/null >"$out" 2>&1
 }
 
 # No IR camera: nothing is installed and nothing is written.
@@ -303,8 +420,9 @@ rm -f "$pamd/omarchy-lock-face"
 run_script "$setup" present ok match || fail "setup succeeds with a camera, an enrollment and a match" "$(cat "$calls")"
 grep -q $'omarchy-bar\tput\tomarchy.faceauth.presence\t--before\tomarchy.power' "$calls" || fail "setup puts the walk-away widget on the bar after the match" "$(cat "$calls")"
 enrol_line=$(grep -n $'faceauth\tenroll' "$calls" | head -1 | cut -d: -f1)
-tee_line=$(grep -n $'sudo\ttee' "$calls" | head -1 | cut -d: -f1)
-(( enrol_line < tee_line )) || fail "the PAM service is written only after enrollment" "$(cat "$calls")"
+write_line=$(grep -n $'sudo\tinstall\t-m\t644' "$calls" | head -1 | cut -d: -f1)
+[[ -n $write_line ]] && (( enrol_line < write_line )) || fail "the PAM service is written only after enrollment" "$(cat "$calls")"
+! grep -q $'sudo\ttee' "$calls" || fail "every PAM file is published whole from a root stage, none through tee" "$(cat "$calls")"
 ! grep -q $'models\tfetch' "$calls" || fail "setup fetches no models; the models package ships them" "$(cat "$calls")"
 add_line=$(grep -nx $'omarchy-pkg-add\tomarchy-faceauth' "$calls" | head -1 | cut -d: -f1)
 doctor_line=$(grep -n $'faceauth\tdoctor' "$calls" | head -1 | cut -d: -f1)
@@ -340,7 +458,42 @@ session    include      system-auth'
 # as the enrollment; setup no longer makes a separate calibration call.
 grep -q $'faceauth\tenroll.*--guided' "$calls" || fail "setup enrolls through the walk-through, which records the person's gestures" "$(cat "$calls")"
 grep -q $'faceauth\tcalibrate' "$calls" && fail "setup makes no separate calibration call" "$(cat "$calls")"
+[[ ! -e $pamd/omarchy-lock-fido2 ]] || fail "without FIDO2 set up, face setup writes no key lane" "$(cat "$pamd/omarchy-lock-fido2")"
 pass "setup installs, enrolls, verifies, and only then writes the lock-face PAM service"
+
+# Mike's ruling (fix round 11): setup locks the IR capture node faceauth
+# reads its frames from, with the rule faceauth itself prints, published
+# whole from a root stage, then reloads udev and replays the video nodes.
+ir_rule_expected='ACTION!="remove", SUBSYSTEM=="video4linux", KERNEL=="video*", ATTR{name}=="ipu3-cio2 1", SUBSYSTEMS=="pci", KERNELS=="0000:00:14.3", TAG-="uaccess", GROUP="root", MODE="0600"'
+[[ -f $udev/72-faceauth-ir-node.rules ]] || fail "setup writes the IR capture node's rule" "$(cat "$calls")"
+(( $(grep -cxF "$ir_rule_expected" "$udev/72-faceauth-ir-node.rules") == 1 )) || fail "the rule file holds faceauth's rule once" "$(cat "$udev/72-faceauth-ir-node.rules")"
+(( $(grep -cv '^#' "$udev/72-faceauth-ir-node.rules") == 1 )) || fail "and nothing else but comments" "$(cat "$udev/72-faceauth-ir-node.rules")"
+rule_line=$(grep -n $'faceauth\tcam\tir-rule' "$calls" | head -1 | cut -d: -f1)
+publish_line=$(grep -nF $'sudo\tmv\t-Tf\t--\t'"$udev"'/.72-faceauth-ir-node.rules.omarchy.' "$calls" | head -1 | cut -d: -f1)
+reload_line=$(grep -n $'sudo\tudevadm\tcontrol\t--reload' "$calls" | head -1 | cut -d: -f1)
+trigger_line=$(grep -n $'sudo\tudevadm\ttrigger\t--action=change\t--subsystem-match=video4linux' "$calls" | head -1 | cut -d: -f1)
+[[ -n $rule_line && -n $publish_line && -n $reload_line && -n $trigger_line ]] && (( rule_line < publish_line && publish_line < reload_line && reload_line < trigger_line )) || fail "the rule is asked of faceauth, published, then udev reloads and replays" "$(cat "$calls")"
+pass "setup locks the IR capture node with faceauth's own rule"
+
+# Left open: faceauth says why, setup says so and goes on.
+rm -f "$pamd/omarchy-lock-face" "$udev/72-faceauth-ir-node.rules"
+ir_rule=open run_script "$setup" present ok match || fail "setup succeeds when the IR capture node is left open" "$(cat "$out")"
+[[ ! -e $udev/72-faceauth-ir-node.rules ]] || fail "no rule is written for a node faceauth leaves open"
+! grep -q $'sudo\tudevadm' "$calls" || fail "udev is not touched when nothing is written" "$(cat "$calls")"
+grep -q 'offers colour formats too' "$out" && grep -q 'stays open to your account' "$out" || fail "setup passes faceauth's reason on" "$(cat "$out")"
+rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
+run_script "$setup" present ok match || fail "setup succeeds again for the removal below" "$(cat "$out")"
+pass "setup leaves the IR capture node open, and says why, when faceauth does"
+
+# A USB camera's rule is two lines; setup writes both, in order.
+rm -f "$pamd/omarchy-lock-face" "$udev/72-faceauth-ir-node.rules"
+rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
+ir_rule=usb run_script "$setup" present ok match || fail "setup succeeds with a USB camera's rule" "$(cat "$out")"
+(( $(grep -cv '^#' "$udev/72-faceauth-ir-node.rules") == 2 )) || fail "both lines of the rule are written" "$(cat "$udev/72-faceauth-ir-node.rules")"
+grep -v '^#' "$udev/72-faceauth-ir-node.rules" | head -1 | grep -q 'ENV{FACEAUTH_IR_NODE}="1"' || fail "the marking line comes first" "$(cat "$udev/72-faceauth-ir-node.rules")"
+rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
+run_script "$setup" present ok match || fail "setup succeeds again for the removal below" "$(cat "$out")"
+pass "setup writes a USB camera's two-line rule whole"
 
 # Setup writes FaceAuth's own lines, byte for byte: the sudo and polkit-1
 # lines and the omarchy-lock-face block of packaging/pam-example.txt in the
@@ -375,12 +528,33 @@ grep -q $'omarchy-pkg-drop\tomarchy-faceauth\tomarchy-faceauth-models' "$calls" 
 grep -q $'faceauth\ttemplates\tdelete' "$calls" || fail "removal deletes the templates by default" "$(cat "$calls")"
 ! grep -q pam_faceauth "$pamd/sudo" || fail "removal takes the consent line off the sudo stack" "$(cat "$pamd/sudo")"
 [[ $(cat "$pamd/sudo") == "auth include system-auth" ]] || fail "removal leaves the sudo stack as it was before setup" "$(cat "$pamd/sudo")"
-grep -qF $'sudo\tsed\t-i\t/pam_faceauth\\.so/d' "$calls" || fail "removal strips the line in place, as fingerprint and FIDO2 do" "$(cat "$calls")"
+grep -qF $'sudo\tmv\t-Tf\t--\t' "$calls" && ! grep -qF $'sudo\tsed' "$calls" || fail "removal replaces the stack whole under the PAM edit lock, never in place" "$(cat "$calls")"
 ! grep -q $'sudo\tcp\|pre-face' "$calls" || fail "removal restores nothing from a backup" "$(cat "$calls")"
 [[ ! -e $pamd/polkit-1 ]] || fail "removal deletes the polkit-1 file that setup created"
 [[ ! -e $backups/polkit-1.created-by-faceauth ]] || fail "removal deletes the marker with the file it stood for"
 [[ ! -d $backups ]] || fail "removal takes the marker directory away with the marker" "$(ls -A "$backups")"
-pass "removal takes the PAM service out first, deletes the templates, then drops the package"
+[[ ! -e $udev/72-faceauth-ir-node.rules ]] || fail "removal deletes the IR capture node's rule" "$(cat "$udev/72-faceauth-ir-node.rules")"
+# Fix round 13 (Codex 6, Opus nit): the node is given back, then replayed
+# with add events, since 50-udev-default.rules sets a video node's group on
+# add alone, and doctor reads it after.
+line_of() { grep -n "$1" "$calls" | head -1 | cut -d: -f1 || true; }
+reload_line=$(line_of $'sudo\tudevadm\tcontrol\t--reload')
+reset_line=$(line_of $'sudo\tfaceauth\tcam\tir-reset')
+add_line=$(line_of $'sudo\tudevadm\ttrigger\t--action=add\t--subsystem-match=video4linux')
+settle_line=$(line_of $'sudo\tudevadm\tsettle\t--timeout=10')
+doctor_line=$(grep -n $'faceauth\tdoctor\t--json' "$calls" | tail -1 | cut -d: -f1 || true)
+[[ -n $reload_line && -n $reset_line && -n $add_line && -n $settle_line && -n $doctor_line ]] &&
+  (( reload_line < reset_line && reset_line < add_line && add_line < settle_line && settle_line < doctor_line )) ||
+  fail "removal reloads udev, gives the node back, replays the video nodes' add events and has doctor read the node, in that order" "$(cat "$calls")"
+! grep -q $'udevadm\ttrigger\t--action=change' "$calls" || fail "removal replays add events, not change" "$(cat "$calls")"
+! grep -q "still locked" "$out" || fail "nothing said of a lock when doctor finds none" "$(cat "$out")"
+pass "removal takes the PAM service out first, deletes the templates and the IR node's lock, then drops the package"
+
+# Doctor still finding the lock: said in red, and the removal goes on.
+printf '%s\n' "$ir_rule_expected" >"$udev/72-faceauth-ir-node.rules"
+doctor=ir-capture-fail keep_pam=1 run_script "$remove" present ok match || fail "removal goes on when the node is still locked" "$(cat "$out")"
+grep -q "still locked though no rule holds it" "$out" || fail "removal says when the IR capture node is still locked" "$(cat "$out")"
+pass "removal says when doctor still finds the IR capture node locked"
 
 : >"$calls"
 run_script "$remove" present ok match --keep-templates || fail "removal with --keep-templates succeeds"
@@ -401,20 +575,381 @@ grep -q pam_u2f.so "$pamd/sudo" || fail "removal keeps a pam_u2f line added afte
 (( $(grep -c . "$pamd/sudo") == 2 )) || fail "removal leaves the changed stack otherwise as it was" "$(cat "$pamd/sudo")"
 pass "removal strips only our line when the stack changed after setup"
 
-# Fingerprint or FIDO2 set up first: the face line goes after their line, so
-# a touch or a tap still answers first and the face window, which has no
-# deadline, never sits above a reader the user meant to use. The clamshell
-# gate fingerprint puts before its own line stays exactly there.
+# Fingerprint set up first: the face line goes after its line, so a touch on
+# the reader still answers first and the face window, which has no deadline
+# and cannot ask the reader yet, never sits above it. The clamshell gate
+# fingerprint puts before its own line stays exactly there.
 rm -rf "$backups"; mkdir -p "$backups"; rm -f "$pamd/polkit-1"
 printf 'auth      [success=1 default=ignore] pam_exec.so quiet /usr/bin/omarchy-hw-laptop-closed\nauth      sufficient pam_fprintd.so\nauth include system-auth\n' >"$pamd/sudo"
 keep_pam=1 run_script "$setup" present ok match || fail "setup succeeds on a stack with a fingerprint line" "$(cat "$calls")"
 [[ $(sed -n 1p "$pamd/sudo") == *omarchy-hw-laptop-closed* && $(sed -n 2p "$pamd/sudo") == *pam_fprintd.so* ]] || fail "the fingerprint gate and line keep their places" "$(cat "$pamd/sudo")"
 [[ $(sed -n 3p "$pamd/sudo") == "${sudo_expected%%$'\n'*}" ]] || fail "the face line goes right after the fingerprint line" "$(cat "$pamd/sudo")"
 [[ $(sed -n 4p "$pamd/sudo") == "auth include system-auth" ]] && (( $(grep -c . "$pamd/sudo") == 4 )) || fail "nothing else moves" "$(cat "$pamd/sudo")"
-printf 'auth sufficient pam_u2f.so cue\nauth include system-auth\n' >"$pamd/sudo"
-keep_pam=1 run_script "$setup" present ok match || fail "setup succeeds on a stack with a FIDO2 line" "$(cat "$calls")"
-[[ $(sed -n 1p "$pamd/sudo") == *pam_u2f.so* && $(sed -n 2p "$pamd/sudo") == *pam_faceauth.so* ]] || fail "the face line goes after a FIDO2 line" "$(cat "$pamd/sudo")"
-pass "setup puts the face line after a fingerprint or FIDO2 line, never above it"
+# A fingerprint line as the stack's last line: the face line still lands,
+# after it, where an insert addressed past the end would have dropped it.
+printf 'auth include system-auth\nauth      sufficient pam_fprintd.so\n' >"$pamd/sudo"
+keep_pam=1 run_script "$setup" present ok match || fail "setup succeeds on a stack ending in a fingerprint line" "$(cat "$out")"
+[[ $(sed -n 3p "$pamd/sudo") == "${sudo_expected%%$'\n'*}" ]] && (( $(grep -c . "$pamd/sudo") == 3 )) || fail "the face line lands after a fingerprint line that ends the stack" "$(cat "$pamd/sudo")"
+pass "setup puts the face line after a fingerprint line, never above it, even one that ends the stack"
+
+# FIDO2 set up first: face setup takes the key over. Our pam_u2f line comes
+# out, and the face daemon's key-fallback line goes right below the face
+# line in its place, with the options it had, so every use of the key goes
+# through the daemon; no pam_u2f line stays. A FIDO2 line setup did not
+# write stays where it is, and face goes after it.
+u2f_sudo='auth    sufficient pam_u2f.so cue authfile=/etc/fido2/fido2'
+u2f_polkit='auth      sufficient pam_u2f.so cue authfile=/etc/fido2/fido2'
+face_sudo=${sudo_expected%%$'\n'*}
+fb='auth      sufficient pam_faceauth.so socket=/run/faceauth/sock key-fallback cue'
+# The jump form an earlier setup wrote; read as ours and written back plain.
+face_jump='auth      [success=done authinfo_unavail=1 default=ignore] pam_faceauth.so socket=/run/faceauth/sock consent'
+new_order="$face_sudo
+$fb
+auth include system-auth"
+no_u2f() {
+  ! grep -qE '^[^#]*pam_u2f\.so' "$@" || fail "no pam_u2f line once face is set up" "$(grep -H pam_u2f "$@")"
+}
+printf '%s\nauth include system-auth\n' "$u2f_sudo" >"$pamd/sudo"
+keep_pam=1 run_script "$setup" present ok match || fail "setup succeeds on a stack with our FIDO2 line" "$(cat "$calls")"
+[[ $(cat "$pamd/sudo") == "$new_order" ]] || fail "our FIDO2 line becomes the daemon's key-fallback line right below the face line" "$(cat "$pamd/sudo")"
+no_u2f "$pamd/sudo"
+printf '%s\nauth include system-auth\n' "$u2f_sudo userverification=1" >"$pamd/sudo"
+keep_pam=1 run_script "$setup" present ok match || fail "setup succeeds on our FIDO2 line with user verification" "$(cat "$calls")"
+[[ $(sed -n 2p "$pamd/sudo") == "$fb userverification=1" ]] || fail "the key-fallback line mirrors the options our line had" "$(cat "$pamd/sudo")"
+no_u2f "$pamd/sudo"
+printf 'auth sufficient pam_u2f.so cue pinverification=1\nauth include system-auth\n' >"$pamd/sudo"
+rc=0; keep_pam=1 run_script "$setup" present ok match || rc=$?
+(( rc == 2 )) && [[ $(sed -n 1p "$pamd/sudo") == 'auth sufficient pam_u2f.so cue pinverification=1' ]] && ! grep -q pam_faceauth "$pamd/sudo" || fail "a FIDO2 line setup did not write (no key file) stops face setup, and the stack is left as it was" "rc=$rc $(cat "$pamd/sudo")"
+printf 'auth      [success=1 default=ignore] pam_exec.so quiet /usr/bin/omarchy-hw-laptop-closed\nauth      sufficient pam_fprintd.so\n%s\nauth include system-auth\n' "$u2f_sudo" >"$pamd/sudo"
+keep_pam=1 run_script "$setup" present ok match || fail "setup succeeds on a stack with fingerprint and FIDO2 lines" "$(cat "$calls")"
+[[ $(sed -n 2p "$pamd/sudo") == *pam_fprintd.so* && $(sed -n 3p "$pamd/sudo") == "$face_sudo" && $(sed -n 4p "$pamd/sudo") == "$fb" ]] || fail "the face line goes after the fingerprint line, the key line right below it" "$(cat "$pamd/sudo")"
+no_u2f "$pamd/sudo"
+[[ -z $(ls -A "$pamd" | grep '\.omarchy\.') ]] || fail "no stage is left beside the stack"
+pass "face setup turns our FIDO2 line into the daemon's key-fallback line below a fingerprint line, and stops on a FIDO2 line it did not write"
+
+# Comments do not count: a `# pam_faceauth.so` or `# pam_u2f.so` comment is
+# neither placed nor removed, and the lines land as they would without it.
+printf '# pam_faceauth.so runs first here\n%s\n# auth sufficient pam_u2f.so pinverification=1\nauth include system-auth\n' "$u2f_sudo" >"$pamd/sudo"
+keep_pam=1 run_script "$setup" present ok match || fail "setup succeeds on a stack with commented module names" "$(cat "$out")"
+commented_expected="$face_sudo
+$fb
+# pam_faceauth.so runs first here
+# auth sufficient pam_u2f.so pinverification=1
+auth include system-auth"
+[[ $(cat "$pamd/sudo") == "$commented_expected" ]] || fail "comments that name the modules are kept, and the key line lands below the face line" "$(cat "$pamd/sudo")"
+printf '# pam_faceauth.so\n%s\nauth include system-auth\n' "$face_sudo" >"$pamd/sudo"
+run_fido2 || fail "FIDO2 setup succeeds on a stack with a commented face line" "$(cat "$out")"
+[[ $(sed -n 1p "$pamd/sudo") == '# pam_faceauth.so' && $(sed -n 2p "$pamd/sudo") == "$face_sudo" && $(sed -n 3p "$pamd/sudo") == "$fb" ]] || fail "FIDO2 setup places the key line below the active face line, not the comment" "$(cat "$pamd/sudo")"
+grep -q 'Configuring sudo to take the key through face authentication' "$out" || fail "FIDO2 setup says the key goes through face" "$(cat "$out")"
+no_u2f "$pamd/sudo"
+pass "commented module names are neither placed nor removed"
+
+# A stack from before the window could ask the key has our FIDO2 line above
+# our own face line, and one from the last round the jump form. A rerun of
+# either setup puts face first with the key line below it; a FIDO2 line
+# setup did not write stays.
+old_order="$u2f_sudo
+$face_jump
+#%PAM-1.0
+auth include system-auth"
+printf '%s\n' "$old_order" >"$pamd/sudo"
+keep_pam=1 run_script "$setup" present ok match || fail "setup succeeds on the old order" "$(cat "$calls")"
+[[ $(cat "$pamd/sudo") == "$face_sudo"$'\n'"$fb"$'\n#%PAM-1.0\nauth include system-auth' ]] || fail "a face setup rerun puts the face line first, plain, with the key line below it" "$(cat "$pamd/sudo")"
+grep -q 'Moving the face line in sudo into place' "$out" || fail "setup says it moved the line" "$(cat "$out")"
+printf '%s\n' "$old_order" >"$pamd/sudo"
+run_fido2 || fail "FIDO2 setup succeeds on the old order" "$(cat "$out")"
+[[ $(cat "$pamd/sudo") == "$face_sudo"$'\n'"$fb"$'\n#%PAM-1.0\nauth include system-auth' ]] || fail "a FIDO2 setup rerun turns the FIDO2 line into the key line below the face line" "$(cat "$pamd/sudo")"
+printf 'auth sufficient pam_u2f.so pinverification=1\n%s\nauth include system-auth\n' "$face_sudo" >"$pamd/sudo"
+rc=0; run_fido2 || rc=$?
+(( rc == 2 )) && [[ $(cat "$pamd/sudo") == 'auth sufficient pam_u2f.so pinverification=1'$'\n'"$face_sudo"$'\nauth include system-auth' ]] || fail "with face set up, FIDO2 setup stops on a FIDO2 line it did not write and changes nothing" "rc=$rc $(cat "$pamd/sudo")"
+grep -q 'sudo has a FIDO2 line face authentication cannot take over' "$out" || fail "FIDO2 setup says why" "$(cat "$out")"
+pass "a rerun of either setup puts the face line first and the key line below it on the old orders"
+
+# Every order of fingerprint, face and FIDO2 setup ends in the same stacks:
+# fingerprint, face, the face daemon's key line, then the password, with no
+# pam_u2f line in either. The sudo face line is `sufficient`, so a refusal
+# goes on to the key line and then the password; polkit's keeps
+# auth_err=die, so a refusal there ends the request. Reruns change nothing.
+fp_stack='auth      [success=1 default=ignore] pam_exec.so quiet /usr/bin/omarchy-hw-laptop-closed
+auth      sufficient pam_fprintd.so'
+# Whichever setup runs last, the lock screen ends with the face daemon's key
+# lane: FIDO2 setup writes it when face is set up, and face setup when
+# FIDO2 is.
+key_lane_expected='#%PAM-1.0
+auth       sufficient                  pam_faceauth.so socket=/run/faceauth/sock key-unlock
+auth       required                    pam_deny.so
+account    include                     system-local-login'
+order_case() {
+  local name=$1 step
+  shift
+  rm -rf "$backups"; mkdir -p "$backups"
+  rm -f "$pamd/omarchy-lock-face" "$pamd/omarchy-lock-fido2"
+  printf '%s\nauth include system-auth\n' "$fp_stack" >"$pamd/sudo"
+  printf '#%%PAM-1.0\n%s\nauth       include      system-auth\naccount    include      system-auth\n' "$fp_stack" >"$pamd/polkit-1"
+  for step in "$@"; do
+    case $step in
+      face) keep_pam=1 run_script "$setup" present ok match || fail "$name: face setup succeeds" "$(cat "$out")" ;;
+      fido2) run_fido2 || fail "$name: FIDO2 setup succeeds" "$(cat "$out")" ;;
+    esac
+  done
+  [[ $(cat "$pamd/sudo") == "$fp_stack"$'\n'"$face_sudo"$'\n'"$fb"$'\nauth include system-auth' ]] || fail "$name: sudo ends fingerprint, face, the key line, password" "$(cat "$pamd/sudo")"
+  [[ $(grep -E '^[^#]*pam_(fprintd|faceauth|u2f)\.so' "$pamd/polkit-1") == "${fp_stack#*$'\n'}"$'\n'"$pam_example_polkit"$'\n'"$fb" ]] || fail "$name: polkit-1 ends fingerprint, face, the key line" "$(cat "$pamd/polkit-1")"
+  no_u2f "$pamd/sudo" "$pamd/polkit-1"
+  (( $(grep -cxF "$pam_example_polkit" "$pamd/polkit-1") == 1 )) || fail "$name: the polkit face line keeps auth_err=die" "$(cat "$pamd/polkit-1")"
+  [[ $(cat "$pamd/omarchy-lock-fido2" 2>&1) == "$key_lane_expected" ]] || fail "$name: the lock screen takes the key through the daemon's key-unlock lane" "$(cat "$pamd/omarchy-lock-fido2" 2>&1)"
+  ! grep -q pam_u2f "$pamd"/omarchy-lock-* || fail "$name: no lock screen service asks the key through pam_u2f" "$(grep pam_u2f "$pamd"/omarchy-lock-*)"
+}
+order_case "fingerprint, face, FIDO2" face fido2
+before_sudo=$(cat "$pamd/sudo"); before_polkit=$(cat "$pamd/polkit-1")
+keep_pam=1 run_script "$setup" present ok match || fail "a face rerun succeeds" "$(cat "$out")"
+grep -q 'sudo is already configured' "$out" || fail "a face rerun finds sudo in place" "$(cat "$out")"
+run_fido2 || fail "a FIDO2 rerun succeeds" "$(cat "$out")"
+[[ $(cat "$pamd/sudo") == "$before_sudo" && $(cat "$pamd/polkit-1") == "$before_polkit" ]] || fail "reruns change neither stack" "$(cat "$pamd/sudo" "$pamd/polkit-1")"
+# A pam_u2f line added by hand anywhere in sudo or polkit-1 reads the key
+# outside the daemon: the next setup stops with status 2 and says which line
+# and how to fix it, changing nothing (the daemon meanwhile offers the key
+# nowhere, which doctor reports).
+before_polkit=$(cat "$pamd/polkit-1")
+printf 'auth      sufficient pam_u2f.so cue authfile=/home/someone/keys\n' >>"$pamd/polkit-1"
+rc=0; run_fido2 || rc=$?
+(( rc == 2 )) || fail "FIDO2 setup stops beside a hand-added pam_u2f line" "rc=$rc $(cat "$out")"
+grep -q 'polkit-1 has a FIDO2 line face authentication cannot take over' "$out" && grep -qF 'authfile=/home/someone/keys' "$out" || fail "setup names the file and the line" "$(cat "$out")"
+grep -q 'cue authfile=/home/someone/keys' "$pamd/polkit-1" || fail "the hand-added line itself is left alone"
+printf '%s\n' "$before_polkit" >"$pamd/polkit-1"
+order_case "fingerprint, FIDO2, face" fido2 face
+# Face removal turns the key line back into our pam_u2f line, so the key
+# keeps working for sudo without face, takes the face lines and the lock
+# screen's key lane, under the lock, and leaves fingerprint where it was.
+keep_pam=1 run_script "$remove" present ok match || fail "removal succeeds with the key lane set up" "$(cat "$out")"
+[[ ! -e $pamd/omarchy-lock-fido2 ]] || fail "face removal deletes the key lane" "$(cat "$pamd/omarchy-lock-fido2")"
+grep -Fxq $'sudo\trm\t-f\t--\t'"$pamd/omarchy-lock-fido2" "$calls" || fail "the key lane is removed under the PAM edit lock" "$(cat "$calls")"
+[[ $(cat "$pamd/sudo") == "$fp_stack"$'\n'"$u2f_sudo"$'\nauth include system-auth' ]] || fail "face removal restores our pam_u2f line where the key line was" "$(cat "$pamd/sudo")"
+[[ $(grep -E '^[^#]*pam_(fprintd|faceauth|u2f)\.so' "$pamd/polkit-1") == "${fp_stack#*$'\n'}"$'\n'"$u2f_polkit" ]] || fail "and in polkit-1" "$(cat "$pamd/polkit-1")"
+grep -q 'the security key goes back to its own FIDO2 line' "$out" || fail "removal says the key keeps working" "$(cat "$out")"
+# The options the key line mirrored come back with it.
+printf '%s\n%s\nauth include system-auth\n' "$face_sudo" "$fb pinverification=1 userverification=1" >"$pamd/sudo"
+keep_pam=1 run_script "$remove" present ok match || fail "removal succeeds on a key line with options" "$(cat "$out")"
+[[ $(cat "$pamd/sudo") == "$u2f_sudo pinverification=1 userverification=1"$'\nauth include system-auth' ]] || fail "the PIN and user verification come back on the pam_u2f line" "$(cat "$pamd/sudo")"
+rm -f "$pamd/polkit-1"
+pass "every order of fingerprint, face and FIDO2 setup ends fingerprint, face, the daemon's key line and the password, no pam_u2f, polkit's auth_err=die and the key lane; a hand-added pam_u2f line stops setup; face removal restores pam_u2f"
+
+# The polkit line's controls are pinned: success ends the stack, the user's
+# no ends the request with no key and no password, and anything else goes
+# on to the key line. Sudo's face line is `sufficient`: a no at a card the
+# user saw goes on to the key line and the password (the shake-then-key
+# path); the key line itself is refused by the daemon while locked.
+[[ $pam_example_polkit == 'auth      [success=done auth_err=die default=ignore] pam_faceauth.so socket=/run/faceauth/sock consent' ]] || fail "polkit's face line ends the request on a refusal" "$pam_example_polkit"
+[[ $face_sudo == 'auth      sufficient pam_faceauth.so socket=/run/faceauth/sock consent' ]] || fail "sudo's face line is sufficient, so a refusal goes on to the key line" "$face_sudo"
+[[ $fb == 'auth      sufficient pam_faceauth.so socket=/run/faceauth/sock key-fallback cue' ]] || fail "the key line is the daemon's, sufficient, so its failure goes on to the password" "$fb"
+printf '%s\n%s\nauth include system-auth\n' "$face_jump" "$fb" >"$pamd/sudo"
+keep_pam=1 run_script "$setup" present ok match || fail "setup succeeds on the old jump form" "$(cat "$out")"
+[[ $(cat "$pamd/sudo") == "$new_order" ]] || fail "the jump form is written back sufficient" "$(cat "$pamd/sudo")"
+pass "the polkit face line keeps auth_err=die, and the sudo one and the key line are sufficient"
+
+# Each change replaces the whole file in one step: when the root-owned copy
+# cannot be written, the stack is left exactly as it was, setup says so,
+# and no stage is left behind.
+printf '%s\nauth include system-auth\n' "$u2f_sudo" >"$pamd/sudo"
+TEST_INSTALL_FAIL=1 keep_pam=1 run_script "$setup" present ok match && fail "setup fails when the stack cannot be replaced"
+[[ $(cat "$pamd/sudo") == "$u2f_sudo"$'\nauth include system-auth' ]] || fail "a stack that could not be replaced is left as it was" "$(cat "$pamd/sudo")"
+grep -q 'sudo could not be changed as intended and was left as it was' "$out" || fail "setup says the stack was left as it was" "$(cat "$out")"
+[[ -z $(ls -A "$pamd" | grep '\.omarchy\.') ]] || fail "no stage is left behind" "$(ls -A "$pamd")"
+pass "a stack that cannot be replaced is left exactly as it was"
+
+# The lock screen's key lane that cannot be written fails setup, said out
+# loud, rather than leave an older lane standing while setup reports done
+# (Codex 6).
+printf '%s\nauth include system-auth\n' "$u2f_sudo" >"$pamd/sudo"
+rm -f "$pamd/polkit-1" "$pamd/omarchy-lock-fido2"
+printf '#%%PAM-1.0\nauth       required                    pam_u2f.so cue authfile=/etc/fido2/fido2\n' >"$pamd/omarchy-lock-fido2"
+TEST_INSTALL_FAIL_FOR=omarchy-lock-fido2 keep_pam=1 run_script "$setup" present ok match && fail "setup fails when the key lane cannot be written"
+grep -q "security key lane could not be changed as intended" "$out" || fail "setup says the lane failed" "$(cat "$out")"
+[[ $(cat "$pamd/sudo") == "$new_order" ]] || fail "the stacks themselves were written" "$(cat "$pamd/sudo")"
+rm -f "$pamd/omarchy-lock-fido2" "$pamd/polkit-1"
+pass "a key lane that cannot be written fails setup"
+# Round 5 (Codex 1, Opus F2; Mike: faceauth takes over the key lines): face
+# setup never leaves a pam_u2f line above face. A key line it cannot take
+# over exactly (a word outside cue, pinverification= and userverification=,
+# another key file or control, a second pam_u2f line, or a pam_u2f line
+# beside a key-fallback line) stops setup with status 2 before anything is
+# installed or changed, naming the file and the line and the way out.
+for bad in \
+  'auth sufficient pam_u2f.so cue authfile=/etc/fido2/fido2 nodetect' \
+  'auth sufficient pam_u2f.so cue authfile=/home/someone/keys' \
+  'auth required pam_u2f.so cue authfile=/etc/fido2/fido2' \
+  "$u2f_sudo"$'\n'"$u2f_sudo" \
+  "$u2f_sudo"$'\n'"$fb" \
+  "$fb"$'\n'"$fb"; do
+  printf '%s\nauth include system-auth\n' "$bad" >"$pamd/sudo"
+  before_sudo=$(cat "$pamd/sudo")
+  printf '#%%PAM-1.0\nauth       include      system-auth\n' >"$pamd/polkit-1"
+  before_polkit=$(cat "$pamd/polkit-1")
+  rm -f "$pamd/omarchy-lock-face" "$pamd/omarchy-lock-fido2"
+  rc=0
+  keep_pam=1 run_script "$setup" present ok match || rc=$?
+  (( rc == 2 )) || fail "setup stops with status 2 on a key line it cannot take over ($bad)" "rc=$rc $(cat "$out")"
+  [[ $(cat "$pamd/sudo") == "$before_sudo" && $(cat "$pamd/polkit-1") == "$before_polkit" ]] || fail "nothing is changed ($bad)" "$(cat "$pamd/sudo")"
+  [[ ! -e $pamd/omarchy-lock-face ]] || fail "no lock service is written ($bad)"
+  ! grep -q 'omarchy-pkg-add' "$calls" || fail "nothing is installed ($bad)" "$(cat "$calls")"
+  ! grep -qE $'sudo\t(install|mv|mktemp)' "$calls" || fail "no stack is staged ($bad)" "$(cat "$calls")"
+  grep -q 'sudo has a FIDO2 line face authentication cannot take over' "$out" || fail "setup names the file ($bad)" "$(cat "$out")"
+  grep -qF "${bad##*$'\n'}" "$out" || fail "setup names the line ($bad)" "$(cat "$out")"
+  grep -q 'Remove > Security > Fido2' "$out" || fail "setup says how to fix it ($bad)" "$(cat "$out")"
+done
+# The same in polkit-1, with sudo in order.
+printf '%s\nauth include system-auth\n' "$u2f_sudo" >"$pamd/sudo"
+printf '#%%PAM-1.0\nauth      sufficient pam_u2f.so cue authfile=/etc/fido2/fido2 interactive\nauth       include      system-auth\n' >"$pamd/polkit-1"
+before_sudo=$(cat "$pamd/sudo"); before_polkit=$(cat "$pamd/polkit-1")
+rc=0
+keep_pam=1 run_script "$setup" present ok match || rc=$?
+(( rc == 2 )) && [[ $(cat "$pamd/sudo") == "$before_sudo" && $(cat "$pamd/polkit-1") == "$before_polkit" ]] || fail "a line polkit-1 cannot take over stops setup before sudo is touched" "rc=$rc $(cat "$pamd/sudo")"
+grep -q 'polkit-1 has a FIDO2 line face authentication cannot take over' "$out" || fail "setup names polkit-1" "$(cat "$out")"
+rm -f "$pamd/polkit-1"
+pass "face setup stops with status 2 before changing anything on a key line it cannot take over, and says which and how to fix it"
+
+# Round 5 (Codex 2, Opus F1): a key-fallback line with a word the scripts do
+# not mirror, or one said twice, is never rewritten with defaults: every
+# mode leaves the stack as it is and returns 2. And a rewrite must carry the
+# key line's policy exactly (pam_stack_landed).
+(
+  export TEST_LOG="$calls" TEST_PAMD="$pamd" TEST_BACKUPS="$backups" TEST_STORE="$store"
+  export OMARCHY_PATH="$omarchy_tree" XDG_RUNTIME_DIR="$test_tmp" PATH="$stub_bin:$PATH"
+  source "$omarchy_tree/install/helpers/pam-stack.sh"
+  for odd in "$fb pinverification=1 userverification=1 timeout=45" "$fb pinverification=1 pinverification=0" "$fb cue"; do
+    for mode in face fido2 unface; do
+      printf '%s\n%s\nauth include system-auth\n' "$face_sudo" "$odd" >"$pamd/sudo"
+      before=$(cat "$pamd/sudo")
+      rc=0; pam_stack_place "$pamd/sudo" "$mode" "$face_sudo" || rc=$?
+      (( rc == 2 )) || { echo "$mode on '$odd': rc=$rc"; cat "$pamd/sudo"; exit 1; }
+      [[ $(cat "$pamd/sudo") == "$before" ]] || { echo "$mode on '$odd' changed the stack"; cat "$pamd/sudo"; exit 1; }
+    done
+  done
+  old="$face_sudo"$'\n'"$fb pinverification=1 userverification=1"$'\nauth include system-auth'
+  new="$face_sudo"$'\n'"$fb"$'\nauth include system-auth'
+  ! pam_stack_landed face "$face_sudo" "$old" "$new" "$pamd/sudo" || { echo "landed took a dropped PIN"; exit 1; }
+  new="$face_sudo"$'\n'"$fb pinverification=1 userverification=1"$'\nauth include system-auth'
+  pam_stack_landed face "$face_sudo" "$old" "$new" "$pamd/sudo" || { echo "landed refused the same policy"; exit 1; }
+) >"$out" 2>&1 || fail "a key line with an odd word is left alone with status 2, and a rewrite keeps the policy exactly" "$(cat "$out")"
+pass "a key line with a word the scripts do not mirror, or one said twice, is never rewritten with defaults"
+
+# Round 5 (Codex 4): a word absent, `=0` and `=1` are three different things
+# to pam_u2f, and each comes through face setup and face removal as it was.
+for words in '' ' pinverification=0' ' userverification=0' ' pinverification=1 userverification=0' ' pinverification=0 userverification=1'; do
+  printf '%s\nauth include system-auth\n' "$u2f_sudo$words" >"$pamd/sudo"
+  rm -f "$pamd/polkit-1"
+  keep_pam=1 run_script "$setup" present ok match || fail "setup succeeds on '$words'" "$(cat "$out")"
+  [[ $(sed -n 2p "$pamd/sudo") == "$fb$words" ]] || fail "the key line keeps '$words' exactly" "$(cat "$pamd/sudo")"
+  keep_pam=1 run_script "$remove" present ok match || fail "removal succeeds on '$words'" "$(cat "$out")"
+  [[ $(cat "$pamd/sudo") == "$u2f_sudo$words"$'\nauth include system-auth' ]] || fail "removal restores '$words' exactly" "$(cat "$pamd/sudo")"
+done
+rm -f "$pamd/polkit-1"
+pass "absent, =0 and =1 stay distinct through face setup and removal"
+
+# Round 5 (Codex 6): the lock file is made private first, under umask 077,
+# and only then root:wheel 0640, so no other account can open it while it
+# is being made.
+rm -f "$test_tmp/pam-stack.lock" "$test_tmp/pam-stack.lock.chowned"
+(
+  umask 022
+  export TEST_LOG="$calls" TEST_PAMD="$pamd" TEST_BACKUPS="$backups" TEST_STORE="$store"
+  export OMARCHY_PATH="$omarchy_tree" XDG_RUNTIME_DIR="$test_tmp" PATH="$stub_bin:$PATH"
+  source "$omarchy_tree/install/helpers/pam-stack.sh"
+  : >"$calls"
+  pam_stack_locked true || exit 1
+  grep -Fxq $'touch-umask\t0077' "$calls" || exit 2
+  [[ $(stat -c '%a' -- "$pam_stack_lock") == "640" ]] || exit 3
+) >"$out" 2>&1 || fail "the lock file is made private first, then root:wheel 0640 (step $?)" "$(cat "$out" "$calls")"
+pass "the lock file is made private first, then root:wheel 0640"
+
+# Two edits at once are serialized: each reads, renders and publishes the
+# stack under one lock, from a stage of its own, so neither writes over the
+# other's change. Face and FIDO2 setup race here on one stack, with every
+# root copy slowed down.
+printf 'auth include system-auth\n' >"$pamd/sudo"
+(
+  export TEST_LOG="$calls" TEST_PAMD="$pamd" TEST_BACKUPS="$backups" TEST_STORE="$store" TEST_INSTALL_SLOW=0.3
+  export OMARCHY_PATH="$omarchy_tree" XDG_RUNTIME_DIR="$test_tmp" PATH="$stub_bin:$PATH"
+  source "$omarchy_tree/install/helpers/pam-stack.sh"
+  pam_stack_place "$pamd/sudo" face "$face_sudo" &
+  first=$!
+  pam_stack_place "$pamd/sudo" fido2 "" &
+  second=$!
+  wait "$first"
+  wait "$second"
+) >"$out" 2>&1 || true
+[[ $(cat "$pamd/sudo") == "$new_order" ]] || fail "two edits at once both land, one after the other" "$(cat "$pamd/sudo")"
+[[ -z $(ls -A "$pamd" | grep '\.omarchy\.') ]] || fail "no stage is left behind after the race" "$(ls -A "$pamd")"
+pass "two edits at once are serialized, from stages of their own"
+
+# The lock is the machine's, not a user's: a run from another account (its
+# own runtime directory) waits for a holder of the one root-made lock file.
+(
+  export TEST_LOG="$calls" TEST_PAMD="$pamd" TEST_BACKUPS="$backups" TEST_STORE="$store"
+  export OMARCHY_PATH="$omarchy_tree" PATH="$stub_bin:$PATH"
+  source "$omarchy_tree/install/helpers/pam-stack.sh"
+  [[ $pam_stack_lock == "$test_tmp/pam-stack.lock" ]] || exit 1
+  flock "$pam_stack_lock" sleep 1.5 &
+  holder=$!
+  sleep 0.3
+  start=$(date +%s%N)
+  XDG_RUNTIME_DIR="$test_tmp/another-user" pam_stack_locked true
+  waited=$(( ($(date +%s%N) - start) / 1000000 ))
+  wait "$holder"
+  (( waited >= 900 ))
+) >"$out" 2>&1 || fail "a run from another account waits for the machine-wide lock" "$(cat "$out")"
+pass "the PAM edit lock is one root-made file for the whole machine"
+
+# The lock file is made root:wheel 0640 whatever the umask, and checked on
+# every use: under umask 077 root's touch makes it 0600, which nobody in
+# wheel could open, so setup chowns and chmods it; a file that is not so is
+# put right before any edit, and one that cannot be is refused.
+rm -f "$test_tmp/pam-stack.lock" "$test_tmp/pam-stack.lock.chowned"
+(
+  umask 077
+  export TEST_LOG="$calls" TEST_PAMD="$pamd" TEST_BACKUPS="$backups" TEST_STORE="$store"
+  export OMARCHY_PATH="$omarchy_tree" XDG_RUNTIME_DIR="$test_tmp" PATH="$stub_bin:$PATH"
+  source "$omarchy_tree/install/helpers/pam-stack.sh"
+  : >"$calls"
+  pam_stack_locked true || exit 1
+  [[ $(stat -c '%a' -- "$pam_stack_lock") == "640" ]] || exit 2
+  grep -Fxq $'sudo\ttouch\t'"$pam_stack_lock" "$calls" || exit 3
+  grep -Fxq $'sudo\tchown\troot:wheel\t'"$pam_stack_lock" "$calls" || exit 4
+  grep -Fxq $'sudo\tchmod\t0640\t'"$pam_stack_lock" "$calls" || exit 5
+  : >"$calls"
+  pam_stack_locked true || exit 6
+  ! grep -q $'sudo\t' "$calls" || exit 7
+  /usr/bin/chmod 0644 "$pam_stack_lock"
+  pam_stack_locked true || exit 8
+  [[ $(stat -c '%a' -- "$pam_stack_lock") == "640" ]] || exit 9
+  /usr/bin/chmod 0644 "$pam_stack_lock"
+  TEST_CHMOD_FAIL=1 pam_stack_locked true && exit 10
+  exit 0
+) >"$out" 2>&1 || fail "the lock file is root:wheel 0640 under umask 077 and checked on every use (step $?)" "$(cat "$out" "$calls")"
+pass "the lock file is made root:wheel 0640 whatever the umask and checked on every use"
+
+# Removing face lines replaces the stack whole and keeps every other line
+# where it was, and the key line turns back into our pam_u2f line; a
+# polkit-1 that appears while setup waits for the lock gets our line rather
+# than being written over.
+(
+  export TEST_LOG="$calls" TEST_PAMD="$pamd" TEST_BACKUPS="$backups" TEST_STORE="$store"
+  export OMARCHY_PATH="$omarchy_tree" XDG_RUNTIME_DIR="$test_tmp" PATH="$stub_bin:$PATH"
+  source "$omarchy_tree/install/helpers/pam-stack.sh"
+  printf '%s\n%s\n%s\n# pam_faceauth.so kept\nauth include system-auth\n' "$fp_stack" "$face_jump" "$fb" >"$pamd/sudo"
+  pam_stack_place "$pamd/sudo" unface ""
+  [[ $(cat "$pamd/sudo") == "$fp_stack"$'\n'"$u2f_sudo"$'\n# pam_faceauth.so kept\nauth include system-auth' ]] || { cat "$pamd/sudo"; exit 1; }
+  rc=0; pam_stack_place "$pamd/sudo" unface "" || rc=$?
+  (( rc == 1 )) || exit 1
+  printf '#%%PAM-1.0\nauth       include      system-auth\n' >"$pamd/polkit-1"
+  rc=0; pam_stack_create "$pamd/polkit-1" "not this" face "$pam_example_polkit" || rc=$?
+  (( rc == 0 )) && [[ $(cat "$pamd/polkit-1") == "$pam_example_polkit"$'\n#%PAM-1.0\nauth       include      system-auth' ]] || { cat "$pamd/polkit-1"; exit 1; }
+  rm -f "$pamd/polkit-1"
+  pam_stack_create "$pamd/polkit-1" "made whole" face "$pam_example_polkit"
+  [[ $(cat "$pamd/polkit-1") == "made whole" ]] || exit 1
+  rm -f "$pamd/polkit-1"
+) >"$out" 2>&1 || fail "face lines come out whole, and a stack that appears meanwhile is edited, not replaced" "$(cat "$out")"
+[[ -z $(ls -A "$pamd" | grep '\.omarchy\.') ]] || fail "no stage is left behind" "$(ls -A "$pamd")"
+pass "face lines come out of a stack whole, and a stack that appears meanwhile is edited rather than written over"
 
 # A face line setup did not write, one without consent for instance, would
 # approve sudo on a plain look with no window; setup replaces it with its own

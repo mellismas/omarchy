@@ -1,14 +1,16 @@
 #!/bin/bash
 
 # omarchy:summary=Send an IPC call to the running Omarchy shell
-# omarchy:args=[-q] <target> <method> [args...]
+# omarchy:args=[-q] [-s] <target> <method> [args...]
 # omarchy:examples=omarchy shell shell ping | omarchy-shell shell toggle omarchy.menu '{"menu":"root"}'
 
 QUIET=0
-if [[ ${1:-} == "-q" ]]; then
-  QUIET=1
+STDIN_ARG=0
+while [[ ${1:-} == "-q" || ${1:-} == "-s" ]]; do
+  [[ $1 == "-q" ]] && QUIET=1
+  [[ $1 == "-s" ]] && STDIN_ARG=1
   shift
-fi
+done
 
 fail() {
   (( QUIET )) && exit 0
@@ -26,6 +28,9 @@ to already be running; this command does not start it.
 Options:
   -q  Quiet best-effort mode. Suppress output and return success even when
       the shell, target, method, or arguments are unavailable.
+  -s  Read the last argument from stdin. It goes to the shell over its own
+      socket only, never on a command line, so other processes cannot read
+      it from argv; without the socket the call fails.
 
 Examples:
   omarchy-shell shell ping
@@ -34,6 +39,13 @@ Examples:
   omarchy-shell shell toggle omarchy.menu '{"menu":"root"}'
 USAGE
   exit 0
+fi
+
+# The faceauth daemon hands the consent card its payload, answer token
+# included, this way, so no process list or /proc/PID/cmdline shows it.
+if (( STDIN_ARG )); then
+  stdin_arg=$(cat)
+  set -- "$@" "$stdin_arg"
 fi
 
 (( $# >= 2 )) || fail "Usage: omarchy-shell <target> <method> [args...]"
@@ -102,6 +114,9 @@ if [[ -S $socket && $request != *$'\x1e'* && $request != *$'\x1f'* ]]; then
     fail "omarchy-shell is not responding"
   fi
 fi
+
+# qs ipc takes its arguments on argv, which a -s argument must never reach.
+(( STDIN_ARG )) && fail "omarchy-shell could not deliver the call over its socket"
 
 # The -- keeps function names that shadow qs subcommands (e.g. show) as
 # positionals. qs reports connection failures with a nonzero exit, but IPC-level

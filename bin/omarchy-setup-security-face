@@ -6,6 +6,8 @@
 
 set -e
 
+source "$OMARCHY_PATH/install/helpers/pam-stack.sh"
+
 # These enroll the invoking user's face. Under sudo, $USER is root, which would
 # enroll root and leave the real user's templates behind on removal.
 if (( EUID == 0 )); then
@@ -27,16 +29,16 @@ usage() {
 # looked up through sudo.
 marker_dir=/var/backups/faceauth
 created_marker=$marker_dir/polkit-1.created-by-faceauth
-# The sudo and polkit-1 lines of FaceAuth's pam-example.txt. The module has
-# three answers: a match is PAM_SUCCESS; the user's no at the window (a head
-# shake, a dismissed window, a confirm after the nods that failed) is
-# PAM_AUTH_ERR, which the daemon sends only for a polkit request; every other
-# outcome, from no daemon to no match, is PAM_IGNORE, so the password lines
-# below stay the fallback.
+# The sudo and polkit-1 lines of FaceAuth's pam-example.txt. The module's
+# answers on them: a match is PAM_SUCCESS; the user's no at the window (a
+# head shake, a dismissed window, a confirm after the nods that failed) is
+# PAM_AUTH_ERR, which the daemon sends only for a polkit request; anything
+# else, from no daemon to no match, goes on to the key line and the
+# password lines below.
 #
 # sudo: `sufficient`. The daemon answers a no there with `consent_denied`,
-# which is PAM_IGNORE too, and the stack falls through to the terminal's
-# password prompt, where sudo asks anyway.
+# which the module ignores, and the stack goes on to the key line and then
+# the terminal's password prompt, where sudo asks anyway.
 # polkit: the same line with a different control. Under `sufficient` a no
 # would fall through to polkit's password dialog, and polkit would start the
 # helper again and ask forever; auth_err=die ends the stack on it instead,
@@ -46,35 +48,40 @@ polkit_face_line='auth      [success=done auth_err=die default=ignore] pam_facea
 
 # Elevation is a deliberate act: the line carries `consent`, so the daemon
 # opens a window naming the command and the requester, and the request is
-# approved by two nods or by the password typed into that window. Sitting in
-# front of the machine never elevates anything by itself.
+# approved by two nods, by the password typed into that window, or by a touch
+# of a registered FIDO2 key. Sitting in front of the machine never elevates
+# anything by itself.
 #
-# The line goes above the password but after any fingerprint or FIDO2 line,
-# whichever was set up first: a touch or a tap then still answers first,
-# and the face window, which has no deadline, does not sit above a reader
-# the user meant to use. Fingerprint and FIDO2 setup insert at line 1, so
-# they keep that place when they come later.
+# The line goes above the password and above the key line. While face is
+# set up the key line is the face daemon's own key-fallback line, in place
+# of our pam_u2f line and with the options it had, so every use of the key
+# goes through the daemon: on the card, on this line after a no at the card
+# or with no card, and on the lock screen, one at a time, and never for a
+# request nobody can see. The face line stays after any fingerprint line,
+# which the window cannot ask yet, and after a pam_u2f line setup did not
+# write, which stays where it is (the daemon then offers the key nowhere,
+# and faceauth doctor says why). Any order of setups ends fingerprint,
+# face, the key, then the password (install/helpers/pam-stack.sh).
 #
 # A face line that is not exactly ours (a hand-edited stack, or one missing
 # `consent`) would approve on a plain look with no window at all, so it is
 # replaced rather than kept.
 write_face_line() {
-  local file="$1" line="$2" after
-  if grep -qxF "$line" "$file"; then
+  local file="$1" line="$2"
+  if ! pam_stack_needed "$file" face "$line"; then
     echo "${file##*/} is already configured for face authentication."
     return 0
   fi
-  if grep -qE '^[^#]*pam_faceauth\.so' "$file"; then
+  if grep -qxF "$line" "$file" || grep -qxF "${line/sufficient/[success=done authinfo_unavail=1 default=ignore]}" "$file"; then
+    echo "Moving the face line in ${file##*/} into place, with the key through face authentication..."
+  elif grep -qE '^[^#]*pam_faceauth\.so' "$file"; then
     echo "Replacing a face line in ${file##*/} that setup did not write..."
-    sudo sed -i '/pam_faceauth\.so/d' "$file"
   else
     echo "Configuring ${file##*/} for face authentication..."
   fi
-  after=$(grep -nE '^[^#]*(pam_fprintd|pam_u2f)\.so' "$file" | tail -1 | cut -d: -f1)
-  if [[ -n $after ]]; then
-    sudo sed -i "${after}a $line" "$file"
-  else
-    sudo sed -i "1i $line" "$file"
+  if ! pam_stack_place "$file" face "$line"; then
+    echo -e "\e[31m${file##*/} could not be changed as intended and was left as it was.\e[0m"
+    return 1
   fi
 }
 
@@ -89,21 +96,34 @@ setup_pam_config() {
     # copy of exactly what was written: removal deletes the file, returning
     # polkit to the vendor stack, only while it still matches that copy. A
     # fingerprint or FIDO2 line added later makes the file someone else's too,
-    # and then removal strips our line and leaves the rest in place.
+    # and then removal strips our line and leaves the rest in place. The
+    # file is made under the PAM edit lock, unless one appeared meanwhile,
+    # which then gets our line instead.
     echo "Creating polkit configuration with face authentication..."
-    sudo install -dm700 "$marker_dir"
-    # omarchy:heredoc-expands paths=polkit_face_line -- $polkit_face_line is the constant PAM
-    # line set at the top of this script, never user input; nothing else expands.
-    sudo tee /etc/pam.d/polkit-1 >/dev/null <<EOF
-#%PAM-1.0
+    local status=0
+    pam_stack_locked create_polkit_locked || status=$?
+    if (( status == 2 )); then
+      echo -e "\e[31mpolkit-1 could not be created as intended.\e[0m"
+      return 1
+    fi
+  fi
+}
+
+polkit_stack="#%PAM-1.0
 $polkit_face_line
 auth       include      system-auth
 account    include      system-auth
 password   include      system-auth
-session    include      system-auth
-EOF
-    sudo cp -p /etc/pam.d/polkit-1 "$created_marker"
+session    include      system-auth"
+
+create_polkit_locked() {
+  if [[ -f /etc/pam.d/polkit-1 ]]; then
+    pam_stack_place_locked /etc/pam.d/polkit-1 face "$polkit_face_line"
+    return
   fi
+  sudo install -dm700 "$marker_dir" &&
+    pam_stack_write /etc/pam.d/polkit-1 "$polkit_stack" &&
+    sudo cp -p /etc/pam.d/polkit-1 "$created_marker" || return 2
 }
 
 # The omarchy-lock-face block of FaceAuth's pam-example.txt. The lock
@@ -115,13 +135,29 @@ EOF
 # pam_deny makes it explicit.
 setup_lock_face_pam() {
   echo "Configuring lock screen for face authentication..."
-  sudo tee /etc/pam.d/omarchy-lock-face >/dev/null <<'EOF'
-#%PAM-1.0
+  if ! pam_stack_locked pam_stack_write "$lock_face_pam" "$lock_face_stack"; then
+    echo -e "\e[31mThe lock screen's face service could not be written.\e[0m"
+    return 1
+  fi
+  # With FIDO2 set up too, the lock screen takes the key through this
+  # daemon (install/helpers/pam-stack.sh), whichever setup ran first.
+  local status=0
+  pam_stack_key_lane /etc/pam.d/omarchy-lock-fido2 "$lock_face_pam" /etc/pam.d/sudo /etc/pam.d/polkit-1 || status=$?
+  if (( status == 2 )); then
+    echo -e "\e[31mThe lock screen's security key lane could not be changed as intended.\e[0m"
+    return 1
+  fi
+  if (( status == 0 )) && [[ -f /etc/pam.d/omarchy-lock-fido2 ]]; then
+    echo "Configuring the lock screen to take your security key through face authentication..."
+  fi
+  return 0
+}
+
+lock_face_pam=/etc/pam.d/omarchy-lock-face
+lock_face_stack='#%PAM-1.0
 auth       sufficient                  pam_faceauth.so socket=/run/faceauth/sock timeout=8
 auth       required                    pam_deny.so
-account    include                     system-local-login
-EOF
-}
+account    include                     system-local-login'
 
 # After a successful enrollment setup asks for both obscured face lock times,
 # with the shipped ones selected, and saves them with `presence
@@ -176,8 +212,57 @@ closing_note() {
 }
 
 
+# Face authentication takes over the key lines: sudo's and polkit's FIDO2
+# line becomes the face daemon's key-fallback line, with exactly its words,
+# and no pam_u2f line stays above or beside the face line. A key line setup
+# cannot carry over exactly (a word it does not mirror, another key file or
+# control, a second key line) stops setup here, before anything is
+# installed or changed, with status 2 (install/helpers/pam-stack.sh). Run
+# again right before the stacks are written, since enrollment takes a while.
+check_key_lines() {
+  local file problems
+  for file in /etc/pam.d/sudo /etc/pam.d/polkit-1; do
+    [[ -f $file ]] || continue
+    if problems=$(pam_stack_key_problem "$file"); then
+      echo -e "\e[31m${file##*/} has a FIDO2 line face authentication cannot take over:\e[0m" >&2
+      printf '  %s\n' "$problems" >&2
+      echo "Edit it in $file to Omarchy's own form (auth sufficient pam_u2f.so cue authfile=/etc/fido2/fido2, with only pinverification= and userverification= besides) and keep a single key line, or run Remove > Security > Fido2 first; then run this setup again." >&2
+      exit 2
+    fi
+  done
+}
+
+# The IR capture node faceauth reads its frames from, locked to root (Mike's
+# ruling): faceauth finds the node with its own camera detection and prints
+# the rule only when that node carries infrared alone, pinned by attributes
+# that do not move between boots; otherwise it says why the node is left
+# open, and so does 'faceauth doctor'. The rule sorts between 70-uaccess and
+# 73-seat-late, as the packaged sensor rule does, and is published whole
+# from a root stage. omarchy-remove-security-face deletes it.
+ir_rule_file=/etc/udev/rules.d/72-faceauth-ir-node.rules
+lock_ir_capture_node() {
+  local rule stage
+  if ! rule=$(sudo faceauth cam ir-rule) || [[ -z $rule ]]; then
+    echo "The infrared capture node stays open to your account; 'sudo faceauth doctor' says why."
+    return 0
+  fi
+  if stage=$(sudo mktemp "${ir_rule_file%/*}/.${ir_rule_file##*/}.omarchy.XXXXXX") &&
+    printf '# Written by omarchy-setup-security-face: faceauth reads its infrared frames\n# from this node, so only root may. omarchy-remove-security-face deletes it.\n%s\n' "$rule" |
+    sudo install -m 644 -o root -g root -T /dev/stdin "$stage" &&
+    sudo mv -Tf -- "$stage" "$ir_rule_file" &&
+    sudo udevadm control --reload &&
+    sudo udevadm trigger --action=change --subsystem-match=video4linux; then
+    echo "The infrared capture node is now root's alone."
+  else
+    [[ -z ${stage:-} ]] || sudo rm -f -- "$stage"
+    echo "The infrared capture node could not be locked; 'sudo faceauth doctor' says more." >&2
+  fi
+}
+
 setup_face() {
   echo -e "\e[32mSetting up face authentication.\n\e[0m"
+
+  check_key_lines
 
   if ! omarchy-hw-ir-camera; then
     echo -e "\e[31mNo supported infrared camera detected.\e[0m"
@@ -249,8 +334,10 @@ setup_face() {
       # the looks, along with the ordinary movements they must stand clear
       # of. Setup > Security > Face > Tune Gestures runs those rounds again
       # on their own.
+      check_key_lines
       setup_pam_config
       setup_lock_face_pam
+      lock_ir_capture_node
       ask_obscured_face_lock
       # The walk-away widget joins the bar only on a machine that has face
       # authentication, so nothing polls for a daemon elsewhere. Best-effort,

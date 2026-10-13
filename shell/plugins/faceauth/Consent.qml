@@ -7,11 +7,13 @@ import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
 
-// Opened by faceauthd (root) through `omarchy-shell shell summon omarchy.faceauth`
+// Opened by faceauthd (root) through `omarchy-shell -s shell summon omarchy.faceauth`
 // for every elevation request, so no sudo or polkit request can proceed without
-// a window on the desktop. It informs and it can kill; it cannot approve. The
-// approval is a nod the daemon watches for on its own camera, or the account
-// password typed here and checked by the daemon against the system PAM stack.
+// a window on the desktop. The payload, answer token included, reaches the shell
+// over its own socket from omarchy-shell's stdin, so no command line shows it. It informs and it can kill; it cannot approve. The
+// approval is a nod the daemon watches for on its own camera, the account
+// password typed here and checked by the daemon against the system PAM stack,
+// or a touch of the user's security key, which the daemon asks for itself.
 // The window stays until the request is approved, refused, dismissed or the
 // requester killed. While a request waits the daemon re-sends it every
 // minute; a card no daemon has spoken to for five minutes hides itself
@@ -93,6 +95,11 @@ FaceAuthOverlay {
     var riderChanged = Number(payload.passwordless_minutes || 0) !== root.riderMinutes
     root.riderMinutes = Number(payload.passwordless_minutes || 0)
     root.facePresent = payload.face_present === true
+    root.keyArmed = payload.key_armed === true
+    root.keyPin = payload.key_pin === true
+    // The daemon asks for the PIN again once a PIN has been spent on a
+    // check that ended without a touch.
+    if (payload.key_pin_wanted === true) root.keyPinSent = false
     root.waiting = payload.waiting === true
     root.opened = true
     if (fresh) {
@@ -102,10 +109,14 @@ FaceAuthOverlay {
       // request. It reads no nod until that arrives.
       root.token = token
       passwordField.text = ""
+      keyPinField.text = ""
+      root.keyPinSent = false
       commandArea.contentY = 0
       Qt.callLater(function() { passwordField.forceActiveFocus() })
     }
-    if (token.length > 0 && (fresh || riderChanged)) root.answer(["--ack"], "")
+    // The daemon also asks outright when it holds no acknowledgment for
+    // this show: the card coming back after an unlock is read afresh.
+    if (token.length > 0 && (fresh || riderChanged || payload.ack_wanted === true)) root.answer(["--ack"], "")
   }
 
   property string token: ""
@@ -135,6 +146,27 @@ FaceAuthOverlay {
   // button re-arms; it approves nothing.
   property bool waiting: false
 
+  // The daemon is asking the user's security key alongside the nod, so a
+  // touch approves too. Only the payload sets it; a touch closes the card
+  // with the daemon's approval, as a nod does.
+  property bool keyArmed: false
+  // The key's line in the stack asks for its PIN: the card takes it in a
+  // field of its own and hands it to the daemon like the password, on stdin
+  // with the token, for one check of the key. Only the payload sets it.
+  property bool keyPin: false
+  property bool keyPinSent: false
+  readonly property string keyHintText: !root.keyPin
+    ? Commons.I18n.t("faceConsent.keyTouch")
+    : (root.keyPinSent ? Commons.I18n.t("faceConsent.keyTouchNow") : Commons.I18n.t("faceConsent.keyPinThenTouch"))
+
+  function submitKeyPin() {
+    var pin = keyPinField.text
+    if (pin.length === 0 || !root.pending || !root.keyArmed || !root.keyPin) return
+    keyPinField.text = ""
+    root.keyPinSent = true
+    root.answer(["--key-pin"], pin)
+  }
+
   function readyToNod() {
     if (!root.pending || !root.waiting) return
     root.answer(["--rearm"], "")
@@ -143,10 +175,31 @@ FaceAuthOverlay {
   // Send an answer for the pending request to the daemon. The token from
   // the payload goes first on stdin, the password (if any) second; nothing
   // secret is ever on argv. The daemon accepts it only while this user's
-  // request is live, and only from this user's own uid.
+  // request is live, and only from this user's own uid. Answers queue,
+  // each with the token it was given for, and run one at a time, oldest
+  // first (nextAnswer).
+  property var answerQueue: []
+
   function answer(args, secret) {
-    answerProc.lines = [root.token].concat(secret.length > 0 ? [secret] : [])
-    answerProc.command = ["/usr/bin/faceauth", "consent-answer"].concat(args)
+    root.answerQueue = root.answerQueue.concat([{ args: args, lines: [root.token].concat(secret.length > 0 ? [secret] : []) }])
+    root.nextAnswer()
+  }
+
+  // The oldest waiting answer, once no other is running (fix round 14, Codex
+  // 3). Quickshell's Process keeps one stdinEnabled for all its launches,
+  // and a launch made with it off has its stdin closed from the start
+  // (src/io/process.cpp, setStdinEnabled, startProcessIfReady), so it is
+  // turned back on before each one. `running = true` while a launch runs
+  // only marks the next for when it ends, with whatever command and lines
+  // are set by then (setRunning, onFinished), so nothing is set until the
+  // last one is over.
+  function nextAnswer() {
+    if (answerProc.running || root.answerQueue.length === 0) return
+    var next = root.answerQueue[0]
+    root.answerQueue = root.answerQueue.slice(1)
+    answerProc.lines = next.lines
+    answerProc.stdinEnabled = true
+    answerProc.command = ["/usr/bin/faceauth", "consent-answer"].concat(next.args)
     answerProc.running = true
   }
 
@@ -161,10 +214,15 @@ FaceAuthOverlay {
     id: answerProc
     property var lines: []
     stdinEnabled: true
+    // Its lines, then the end of its stdin, so consent-answer reads to it.
     onStarted: {
       for (var i = 0; i < lines.length; i++) write(lines[i] + "\n")
       lines = []
       stdinEnabled = false
+    }
+    // Ended, or failed to start: the next answer's turn.
+    onRunningChanged: {
+      if (!running) Qt.callLater(root.nextAnswer)
     }
   }
 
@@ -330,6 +388,32 @@ FaceAuthOverlay {
             wrapMode: Text.Wrap
             anchors.verticalCenter: parent.verticalCenter
           }
+        }
+
+        Text {
+          id: keyHint
+          width: parent.width
+          visible: root.pending && root.keyArmed
+          text: root.keyHintText
+          textFormat: Text.PlainText
+          color: root.foreground
+          opacity: 0.9
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+        }
+
+        TextField {
+          id: keyPinField
+          width: parent.width
+          visible: root.pending && root.keyArmed && root.keyPin
+          password: true
+          placeholderText: Commons.I18n.t("faceConsent.keyPinPlaceholder")
+          foreground: root.foreground
+          accent: root.accent
+          font.family: root.fontFamily
+          onAccepted: root.submitKeyPin()
+          Keys.onEscapePressed: root.close()
         }
 
         TextField {

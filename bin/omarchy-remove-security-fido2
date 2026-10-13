@@ -5,20 +5,42 @@
 
 set -e
 
+source "$OMARCHY_PATH/install/helpers/pam-stack.sh"
+
+
+# Every active FIDO2 line goes, in one step per stack, and sudo's face line
+# goes back to plain `sufficient` with no FIDO2 line left for it to jump
+# over (install/helpers/pam-stack.sh).
+remove_u2f_lines() {
+  local file=$1 name=$2
+  pam_stack_needed "$file" unfido2 "" || return 0
+  echo "Removing FIDO2 authentication from $name..."
+  if ! pam_stack_place "$file" unfido2 ""; then
+    echo -e "\e[31mThe $name configuration could not be changed as intended and was left as it was.\e[0m"
+    return 1
+  fi
+}
 
 remove_pam_config() {
   # Remove from sudo
-  if grep -q pam_u2f.so /etc/pam.d/sudo; then
-    echo "Removing FIDO2 authentication from sudo..."
-    sudo sed -i '/pam_u2f\.so/d' /etc/pam.d/sudo
-  fi
+  remove_u2f_lines /etc/pam.d/sudo sudo
 
   # Remove from polkit
-  if [[ -f /etc/pam.d/polkit-1 ]] && grep -Fq 'pam_u2f.so' /etc/pam.d/polkit-1; then
-    echo "Removing FIDO2 authentication from polkit..."
-    sudo sed -i '/pam_u2f\.so/d' /etc/pam.d/polkit-1
+  if [[ -f /etc/pam.d/polkit-1 ]]; then
+    remove_u2f_lines /etc/pam.d/polkit-1 polkit
+  fi
+
+  # Remove from the lock screen: its key lane shows only while this exists
+  if [[ -e $lock_pam || -L $lock_pam ]]; then
+    echo "Removing FIDO2 authentication from the lock screen..."
+    if ! pam_stack_remove "$lock_pam"; then
+      echo -e "\e[31mThe lock screen's key lane could not be removed.\e[0m"
+      return 1
+    fi
   fi
 }
+
+lock_pam=/etc/pam.d/omarchy-lock-fido2
 
 echo -e "\e[32mRemoving FIDO2 device from authentication.\n\e[0m"
 

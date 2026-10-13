@@ -45,7 +45,8 @@ auth required pam_unix.so
 const setupScript = fs.readFileSync(path.join(process.env.ROOT, 'bin/omarchy-setup-security-face'), 'utf8')
 const polkitLine = (setupScript.match(/^polkit_face_line='(.*)'$/m) || [])[1]
 assert(polkitLine, 'setup names its polkit line')
-const createdStack = (setupScript.match(/sudo tee \/etc\/pam\.d\/polkit-1 >\/dev\/null <<EOF\n([\s\S]*?)\nEOF\n/) || [])[1]
+const createdStack = (setupScript.match(/^polkit_stack="([\s\S]*?)"$/m) || [])[1]
+assert(/pam_stack_write \/etc\/pam\.d\/polkit-1 "\$polkit_stack"/.test(setupScript), 'setup writes that stack as polkit-1 when none exists')
 assert(createdStack && createdStack.includes('$polkit_face_line'), 'setup writes a whole polkit-1 around its line when none exists')
 assert(
   polkit.faceConsentConfiguredFromPamConfig(createdStack.replace('$polkit_face_line', polkitLine)),

@@ -17,6 +17,11 @@ Item {
   // face), "idle" (set up, between attempts) or "".
   property bool faceConfigured: false
   property string faceState: ""
+  // A security key unlocks too, while its lane is there: the PAM service
+  // and the face daemon's word that it runs the key.
+  property bool fido2Available: false
+  // faceauth is not running: face and key are hidden, and the view says so.
+  property bool faceauthDown: false
   property bool authenticatingPassword: false
   property string failureMessage: ""
   property int failedAttempts: 0
@@ -304,6 +309,7 @@ Item {
     // is not intuitive that it signals a broken reader — so the words carry the
     // explanation and the icon only reinforces it.
     Text {
+      id: fingerprintUnavailableNotice
       objectName: "fingerprintUnavailableNotice"
       textFormat: Text.PlainText
       anchors.top: inputField.bottom
@@ -315,6 +321,40 @@ Item {
       font.family: Style.font.family
       font.pixelSize: Style.font.heading
       font.italic: true
+      horizontalAlignment: Text.AlignHCenter
+    }
+
+    // A word under the field, beside the other ways in: the key has no spot
+    // of its own inside the field, where the face and fingerprint icons sit.
+    Text {
+      objectName: "fido2Hint"
+      textFormat: Text.PlainText
+      anchors.top: fingerprintUnavailableNotice.visible ? fingerprintUnavailableNotice.bottom : inputField.bottom
+      anchors.topMargin: 18
+      anchors.horizontalCenter: inputField.horizontalCenter
+      visible: root.fido2Available
+      text: Commons.I18n.t("lock.keyTouch")
+      color: Commons.Color.lock.placeholder
+      font.family: Style.font.family
+      font.pixelSize: Style.font.heading
+      horizontalAlignment: Text.AlignHCenter
+    }
+
+    // In place of the face icon and the key's hint while faceauth is not
+    // running, so the user is not left waiting on either.
+    Text {
+      objectName: "faceauthDownNotice"
+      textFormat: Text.PlainText
+      anchors.top: fingerprintUnavailableNotice.visible ? fingerprintUnavailableNotice.bottom : inputField.bottom
+      anchors.topMargin: 18
+      anchors.horizontalCenter: inputField.horizontalCenter
+      width: Math.min(implicitWidth, root.width - 32)
+      wrapMode: Text.WordWrap
+      visible: root.faceauthDown
+      text: Commons.I18n.t("lock.faceauthDown")
+      color: Commons.Color.lock.placeholder
+      font.family: Style.font.family
+      font.pixelSize: Style.font.heading
       horizontalAlignment: Text.AlignHCenter
     }
   }

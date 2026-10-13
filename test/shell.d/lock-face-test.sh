@@ -57,7 +57,7 @@ function lockHarness() {
   const scope = {
     lockRequested: false, pendingSessionLock: false, authenticatingPassword: false,
     fingerprintAuthenticating: false, faceAuthenticating: false, passwordPamConfigured: true,
-    fingerprintConfigured: false, faceConfigured: true, previewVisible: false,
+    fingerprintConfigured: false, faceConfigured: true, faceauthDown: false, previewVisible: false,
     enteredPassword: '', pendingPassword: '', failureMessage: '', failedAttempts: 0,
     displaysBlank: false, monitorDpmsKnown: false, lastFaceStartAt: 0,
     blankDelayDefaultMs: 5000, blankDelayPresenceMs: 600000, blankDelayMs: 5000, presenceLitUsed: false,
@@ -67,6 +67,9 @@ function lockHarness() {
     facePam: { active: false, start() { calls.faceStart += 1; return true }, abort() { calls.faceAbort += 1 } },
     passwordPam: { active: false, abort() {} },
     fingerprintPam: { active: false, abort() {} },
+    fido2Configured: false, fido2Available: false, keyUnlockAvailable: false, fido2Authenticating: false,
+    fido2Pam: { active: false, start() { return true }, abort() {} },
+    fido2RetryTimer: { running: false, restart() {}, stop() {} },
     faceRetryTimer: { running: false, restart() { this.running = true; calls.retry += 1 }, stop() { this.running = false } },
     fingerprintRetryTimer: { running: false, restart() {}, stop() {} },
     fingerprintRecheckTimer: { running: false, restart() {}, stop() {} },
@@ -87,6 +90,9 @@ function lockHarness() {
     logEvent(e) { scope.events.push(e) },
     logFaceEvent(e) { scope.events.push(e) },
     queueSessionLock() {},
+    queryKeyLane() {},
+    openLockChannel() {},
+    closeLockChannel() {},
     refreshBackground() {},
     refreshFingerprintStatus() {},
     nudgeFingerprint() {},
@@ -100,7 +106,7 @@ function lockHarness() {
     if (m) Object.defineProperty(scope, name, { get: () => compileIn([scope], m[1]) })
   }
   const functions = ['currentlyLocked', 'resetAuthenticationState', 'beginLock', 'finishUnlock', 'armBlankTimer', 'runWake', 'runBlank',
-    'startFingerprint', 'startFace', 'handleFaceFinished', 'handleProbeReply', 'probeFace', 'lock', 'lockPresence']
+    'startFingerprint', 'startFido2', 'startFace', 'handleFaceFinished', 'handleProbeReply', 'probeFace', 'lock', 'lockPresence']
   for (const name of functions) {
     const text = blockOf(serviceQml, 'function ' + name + '(')
     if (text) scope[name] = compileIn([scope], text.replace(/^function (\w+)\(([^)]*)\)(: \w+)? \{/, 'function $1($2) {'))
@@ -158,8 +164,8 @@ assert(
 // QML restarts a Timer when `running` turns true, so the look after a scan is
 // a full cadence away.
 assert(
-  /id: faceProbeTimer[\s\S]*?running: root\.lockRequested && root\.faceConfigured && !root\.previewVisible && !root\.faceAuthenticating/.test(serviceQml),
-  'the probe runs while locked, dark panel or lit, and pauses while a scan runs'
+  /id: faceProbeTimer[\s\S]*?running: root\.lockRequested && root\.faceConfigured && !root\.faceauthDown && !root\.previewVisible && !root\.faceAuthenticating/.test(serviceQml),
+  'the probe runs while locked, dark panel or lit, and pauses while a scan runs or faceauth is not running'
 )
 assert(!/id: faceProbeTimer[^}]*triggeredOnStart/.test(serviceQml), 'the probe does not look again the moment a scan ends')
 assert(/onExited: root\.handleProbeReply\(faceProbeStdout\.text\)/.test(serviceQml), 'every probe reply goes through handleProbeReply')

@@ -6,6 +6,8 @@
 set -e
 set -o pipefail
 
+source "$OMARCHY_PATH/install/helpers/pam-stack.sh"
+
 
 check_fido2_hardware() {
   tokens=$(fido2-token -L 2>/dev/null)
@@ -16,28 +18,114 @@ check_fido2_hardware() {
   return 0
 }
 
-setup_pam_config() {
-  # Configure sudo
-  if ! grep -q pam_u2f.so /etc/pam.d/sudo; then
-    echo "Configuring sudo for FIDO2 authentication..."
-    sudo sed -i '1i auth    sufficient pam_u2f.so cue authfile=/etc/fido2/fido2' /etc/pam.d/sudo
+# With face set up, the key line is the face daemon's own key-fallback
+# line, right below the face line: every use of the key then goes through
+# the daemon, which asks the key on the card, on this line and on the lock
+# screen, one at a time and never for a request nobody can see. Without
+# face it is the pam_u2f line, first, as Omarchy has always written it. A
+# pam_u2f line setup did not write stays where it is, and the daemon then
+# offers the key nowhere (install/helpers/pam-stack.sh; faceauth doctor
+# says why).
+write_u2f_line() {
+  local file=$1 name=$2
+  pam_stack_needed "$file" fido2 "" || return 0
+  if grep -qE '^[^#]*pam_faceauth\.so.*[[:space:]]consent([[:space:]]|$)' "$file"; then
+    echo "Configuring $name to take the key through face authentication..."
+  elif grep -qE '^[^#]*pam_u2f\.so' "$file"; then
+    echo "Moving the FIDO2 line in $name into place..."
+  else
+    echo "Configuring $name for FIDO2 authentication..."
   fi
+  if ! pam_stack_place "$file" fido2 ""; then
+    echo -e "\e[31mThe $name configuration could not be changed as intended and was left as it was.\e[0m"
+    return 1
+  fi
+}
 
-  # Configure polkit
-  if [[ -f /etc/pam.d/polkit-1 ]] && ! grep -q 'pam_u2f.so' /etc/pam.d/polkit-1; then
-    echo "Configuring polkit for FIDO2 authentication..."
-    sudo sed -i '1i auth      sufficient pam_u2f.so cue authfile=/etc/fido2/fido2' /etc/pam.d/polkit-1
-  elif [[ ! -f /etc/pam.d/polkit-1 ]]; then
-    echo "Creating polkit configuration with FIDO2 authentication..."
-    sudo tee /etc/pam.d/polkit-1 >/dev/null <<'EOF'
-auth      sufficient pam_u2f.so cue authfile=/etc/fido2/fido2
+# The lock screen takes the key through the face daemon, never through a
+# pam_u2f stack of its own: its key lane, omarchy-lock-fido2, is the
+# daemon's key-unlock line, written only when face authentication is set up
+# and the key goes through the daemon (install/helpers/pam-stack.sh). The
+# daemon asks the key for what sudo's key line asks, user verification
+# included, only while the session is locked, and keeps the face window and
+# the stacks' key lines off the key meanwhile, so a touch while locked can
+# only unlock. A line that asks for the key's PIN gets no lane: the lock
+# screen has no PIN field.
+setup_lock_pam() {
+  local extras status=0
+  if [[ ! -f /etc/pam.d/omarchy-lock-face ]]; then
+    echo "The lock screen keeps to its other ways in: it takes the key through face authentication, which is not set up."
+  fi
+  pam_stack_key_lane /etc/pam.d/omarchy-lock-fido2 /etc/pam.d/omarchy-lock-face /etc/pam.d/sudo /etc/pam.d/polkit-1 || status=$?
+  if (( status == 2 )); then
+    echo -e "\e[31mThe lock screen's key lane could not be changed as intended.\e[0m"
+    return 1
+  fi
+  if [[ ! -f /etc/pam.d/omarchy-lock-fido2 ]]; then
+    if [[ -f /etc/pam.d/omarchy-lock-face ]]; then
+      echo "The lock screen keeps to its other ways in: a FIDO2 line setup did not write reads the key outside face authentication (faceauth doctor says which)."
+    fi
+    return 0
+  fi
+  (( status == 0 )) && echo "Configuring the lock screen to take the key through face authentication..."
+  # The daemon decides at each lock, from sudo's line as it stands then;
+  # say now what it will decide from the line as it stands today.
+  if ! extras=$(pam_stack_u2f_extras /etc/pam.d/sudo); then
+    echo "The lock screen will not offer the key while sudo has $extras."
+  elif [[ $extras == *pinverification=1* ]]; then
+    echo "The lock screen will not offer the key while your FIDO2 line asks for its PIN: the lock screen has no PIN field."
+  fi
+  return 0
+}
+
+# Created whole when polkit has no file of its own (it runs the vendor
+# stack then), under the PAM edit lock, unless one appeared meanwhile.
+fido2_polkit_stack='auth      sufficient pam_u2f.so cue authfile=/etc/fido2/fido2
 auth      include system-auth
 
 account   include system-auth
 password  include system-auth
-session   include system-auth
-EOF
+session   include system-auth'
+
+# With face set up, the key line is the face daemon's, and a key line it
+# cannot carry over exactly stops this setup before anything changes, as
+# it stops face setup (install/helpers/pam-stack.sh). Without face, stock
+# Omarchy's own rules stand.
+check_key_lines() {
+  local file problems
+  for file in /etc/pam.d/sudo /etc/pam.d/polkit-1; do
+    [[ -f $file ]] || continue
+    grep -qE '^[^#]*pam_faceauth\.so.*[[:space:]]consent([[:space:]]|$)' "$file" || continue
+    if problems=$(pam_stack_key_problem "$file"); then
+      echo -e "\e[31m${file##*/} has a FIDO2 line face authentication cannot take over:\e[0m" >&2
+      printf '  %s\n' "$problems" >&2
+      echo "Edit it in $file to Omarchy's own form (auth sufficient pam_u2f.so cue authfile=/etc/fido2/fido2, with only pinverification= and userverification= besides) and keep a single key line, or run Remove > Security > Fido2 first; then run this setup again." >&2
+      exit 2
+    fi
+  done
+}
+
+setup_pam_config() {
+  check_key_lines
+
+  # Configure sudo
+  write_u2f_line /etc/pam.d/sudo sudo
+
+  # Configure polkit
+  if [[ -f /etc/pam.d/polkit-1 ]]; then
+    write_u2f_line /etc/pam.d/polkit-1 polkit
+  else
+    echo "Creating polkit configuration with FIDO2 authentication..."
+    local status=0
+    pam_stack_create /etc/pam.d/polkit-1 "$fido2_polkit_stack" fido2 "" || status=$?
+    if (( status == 2 )); then
+      echo -e "\e[31mThe polkit configuration could not be created as intended.\e[0m"
+      return 1
+    fi
   fi
+
+  # Configure the lock screen
+  setup_lock_pam
 }
 
 echo -e "\e[32mSetting up FIDO2 device for authentication.\n\e[0m"

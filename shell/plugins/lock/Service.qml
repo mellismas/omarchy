@@ -49,6 +49,20 @@ Item {
   // Outputs the lock last saw, so only a display arriving counts as a wake.
   property int knownScreenCount: 0
   property bool faceConfigured: false
+  property bool fido2Configured: false
+  // The face daemon runs the key lane for this user (its key_lane answer,
+  // asked without the camera): with the daemon down from the start of the
+  // lock or the lane withheld, no lane and no hint, whatever the PAM file
+  // says. Once offered, the lane stays for the whole lock: only the
+  // daemon's own "not available" withdraws it.
+  property bool keyUnlockAvailable: false
+  // faceauth is not running: `faceauth key-lane` found no daemon (its
+  // socket missing, or nothing listening on it). Face and key are hidden
+  // and the lock says to use the password, until the next well-formed
+  // answer. A busy or unreadable answer changes nothing.
+  property bool faceauthDown: false
+  readonly property bool fido2Available: fido2Configured && keyUnlockAvailable && !faceauthDown
+  property bool fido2Authenticating: false
   property bool previewVisible: false
   property string enteredPassword: ""
   property string pendingPassword: ""
@@ -255,9 +269,17 @@ Item {
     fingerprintResumeTimer.stop()
     faceAuthenticating = false
     faceRetryTimer.stop()
+    fido2Authenticating = false
+    fido2RetryTimer.stop()
+    // Each lock learns afresh from its own probes whether the key lane is
+    // there, so a daemon gone since the last lock shows no lane.
+    keyUnlockAvailable = false
+    keyLaneRetried = false
+    faceauthDown = false
     if (passwordPam.active) passwordPam.abort()
     if (fingerprintPam.active) fingerprintPam.abort()
     if (facePam.active) facePam.abort()
+    if (fido2Pam.active) fido2Pam.abort()
   }
 
   function beginLock() {
@@ -271,6 +293,11 @@ Item {
     lockRequested = true
     armBlankTimer()
     logEvent("lock-requested")
+    // Before the lock is up: the reserved channel tells the daemon the lock
+    // screen is coming, which takes the face window off the key, and holds
+    // that for the whole lock (round 7).
+    openLockChannel()
+    queryKeyLane()
     queueSessionLock()
 
     Qt.callLater(function() {
@@ -284,6 +311,7 @@ Item {
   function finishUnlock() {
     if (!root.currentlyLocked()) return
 
+    closeLockChannel()
     lockRequested = false
     pendingSessionLock = false
     sessionLockStabilizeTimer.stop()
@@ -560,7 +588,7 @@ Item {
   property double lastFaceStartAt: 0
 
   function startFace() {
-    if (!lockRequested || !sessionLock.secure || !faceConfigured) return
+    if (!lockRequested || !sessionLock.secure || !faceConfigured || faceauthDown) return
     if (displaysBlank) return
     if (facePam.active || faceAuthenticating) return
     if (Date.now() - lastFaceStartAt < 1000) {
@@ -576,6 +604,109 @@ Item {
       return
     }
     logFaceEvent("face-started")
+  }
+
+  // FIDO2: a fourth PAM stack, omarchy-lock-fido2, on its own lane like the
+  // fingerprint and face ones, so a touch of a registered key unlocks. The
+  // stack is the face daemon's key-unlock line, never pam_u2f: the daemon
+  // runs the key check itself, only while the session is locked, and keeps
+  // its consent window off the key meanwhile, so a touch here can only
+  // unlock. FIDO2 setup writes the service (with face set up) and both
+  // removals delete it; the lane runs only while it exists and the daemon's
+  // probe says the lane is there. The daemon's check waits for a touch up
+  // to its own deadline and answers at once when it cannot run; either way
+  // the lane asks again two seconds after an attempt ends, for as long as
+  // the session is locked.
+  function startFido2() {
+    if (!lockRequested || !sessionLock.secure || !fido2Available) return
+    if (fido2Pam.active || fido2Authenticating) return
+
+    fido2Authenticating = true
+    if (!fido2Pam.start()) {
+      fido2Authenticating = false
+      fido2RetryTimer.restart()
+    }
+  }
+
+  // The lock screen's reserved channel to faceauthd (round 7): one
+  // long-lived connection, outside the daemon's connection limits, held for
+  // the whole lock. While it is open the user's key approvals are latched,
+  // so a touch while locked can only unlock. The unlock writes "unlocked",
+  // the graceful close; any other end is a drop, which keeps them latched
+  // until a later lock closes gracefully. Nothing here kills it.
+  function openLockChannel() {
+    if (!lockRequested || !(faceConfigured || fido2Configured)) return
+    if (!lockChannelProc.running) lockChannelProc.running = true
+  }
+
+  // The channel is reconciled, not only opened as the lock begins
+  // (round 8): whenever the configuration loads or changes while locked,
+  // and every two seconds while the lock stands, with the key lane
+  // question (lockChannelReconcileTimer), so a lock that began before the
+  // PAM services were read still gets its channel. openLockChannel opens
+  // at most one.
+  onFaceConfiguredChanged: root.openLockChannel()
+  onFido2ConfiguredChanged: root.openLockChannel()
+
+  function closeLockChannel() {
+    lockChannelRetryTimer.stop()
+    if (lockChannelProc.running) lockChannelProc.write("unlocked\n")
+  }
+
+  // A channel that ended while the lock stands (the daemon restarted, or it
+  // could not open) is opened again a second later.
+  function handleLockChannelExit() {
+    if (lockRequested) lockChannelRetryTimer.restart()
+  }
+
+  // Ask the daemon whether the key lane is there, without the camera, at
+  // the lock and every two seconds while it stands, whatever the answer:
+  // it shows the lane. The reserved channel above keeps the key off
+  // approvals (round 7).
+  function queryKeyLane() {
+    if (!lockRequested || !(faceConfigured || fido2Configured)) return
+    if (!keyLaneProc.running) keyLaneProc.running = true
+  }
+
+  // A well-formed answer sets the lane; "not running" (no daemon at all)
+  // hides face and key until the next well-formed answer; anything else (no
+  // reply, a busy or failing daemon) leaves both as they are, and is asked
+  // again at once, once, rather than at the next tick: every question
+  // latches the daemon's hold, so a dropped one would otherwise leave the
+  // latch a tick short.
+  property bool keyLaneRetried: false
+
+  function handleKeyLaneReply(text) {
+    var available = LockFaceModel.parseKeyLane(text)
+    if (available === null) {
+      if (!keyLaneRetried) {
+        keyLaneRetried = true
+        Qt.callLater(queryKeyLane)
+      }
+      return
+    }
+    keyLaneRetried = false
+    if (available === "down") {
+      keyUnlockAvailable = false
+      if (!faceauthDown) logEvent("key-lane=not-running")
+      faceauthDown = true
+      return
+    }
+    if (faceauthDown) logEvent("key-lane=running")
+    faceauthDown = false
+    if (available === keyUnlockAvailable) return
+    keyUnlockAvailable = available
+    logEvent("key-lane=" + available)
+    startFido2()
+  }
+
+  // onError and onCompleted can both fire; settle each attempt once.
+  function settleFido2(result) {
+    if (!fido2Authenticating) return
+    fido2Authenticating = false
+    if (!lockRequested) return
+    if (result === PamResult.Success) finishUnlock()
+    else fido2RetryTimer.restart()
   }
 
   function handleFaceFinished(result) {
@@ -609,7 +740,7 @@ Item {
   }
 
   function probeFace() {
-    if (!lockRequested || !faceConfigured || previewVisible || faceAuthenticating) return
+    if (!lockRequested || !faceConfigured || faceauthDown || previewVisible || faceAuthenticating) return
     if (!faceProbeProc.running) faceProbeProc.running = true
   }
 
@@ -625,6 +756,7 @@ Item {
         sessionLockStabilizeTimer.stop()
         pendingSessionLockTimer.stop()
         root.startFingerprint()
+        root.startFido2()
         root.probeFace()
       }
     }
@@ -639,6 +771,7 @@ Item {
       }
 
       if (!locked && root.lockRequested) {
+        root.closeLockChannel()
         root.lockRequested = false
         root.pendingSessionLock = false
         sessionLockStabilizeTimer.stop()
@@ -664,8 +797,10 @@ Item {
         backgroundVersion: root.backgroundVersion
         fingerprintConfigured: root.fingerprintConfigured || root.fingerprintUnavailable
         fingerprintUnavailable: root.fingerprintUnavailable
-        faceConfigured: root.faceConfigured
+        faceConfigured: root.faceConfigured && !root.faceauthDown
         faceState: root.faceState
+        fido2Available: root.fido2Available
+        faceauthDown: root.faceauthDown
         authenticatingPassword: root.authenticatingPassword
         failureMessage: root.failureMessage
         failedAttempts: root.failedAttempts
@@ -704,8 +839,10 @@ Item {
       backgroundVersion: root.backgroundVersion
       fingerprintConfigured: root.fingerprintConfigured || root.fingerprintUnavailable
       fingerprintUnavailable: root.fingerprintUnavailable
-      faceConfigured: root.faceConfigured
+      faceConfigured: root.faceConfigured && !root.faceauthDown
       faceState: root.faceState
+      fido2Available: root.fido2Available
+      faceauthDown: root.faceauthDown
       authenticatingPassword: false
       failureMessage: ""
       failedAttempts: 0
@@ -843,6 +980,92 @@ Item {
   }
 
   PamContext {
+    id: fido2Pam
+    config: "omarchy-lock-fido2"
+    user: root.userName
+
+    // The lane answers no question; the daemon's line asks none, so a
+    // prompt means the stack is not the one setup wrote, and it ends the
+    // attempt (abort() gives no completion signal, so it is settled here).
+    onResponseRequiredChanged: {
+      if (!responseRequired) return
+      abort()
+      root.settleFido2(PamResult.Failed)
+    }
+
+    onCompleted: function(result) {
+      root.settleFido2(result)
+    }
+
+    onError: function(error) {
+      root.settleFido2(PamResult.Failed)
+    }
+  }
+
+  Timer {
+    id: fido2RetryTimer
+    interval: 2000
+    repeat: false
+    onTriggered: root.startFido2()
+  }
+
+  Process {
+    id: lockChannelProc
+    command: ["/usr/bin/faceauth", "lock-channel", "--user", root.userName]
+    stdinEnabled: true
+    onExited: root.handleLockChannelExit()
+  }
+
+  Timer {
+    id: lockChannelRetryTimer
+    interval: 1000
+    repeat: false
+    onTriggered: root.openLockChannel()
+  }
+
+  Timer {
+    id: lockChannelReconcileTimer
+    interval: 2000
+    repeat: true
+    running: root.lockRequested
+    onTriggered: root.openLockChannel()
+  }
+
+  // The daemon's answer on the key lane, asked without the camera.
+  Process {
+    id: keyLaneProc
+    command: ["/usr/bin/faceauth", "key-lane", "--user", root.userName]
+    stdout: StdioCollector {
+      id: keyLaneStdout
+      waitForEnd: true
+    }
+    onExited: root.handleKeyLaneReply(keyLaneStdout.text)
+  }
+
+  Timer {
+    id: keyLaneTimer
+    interval: 2000
+    repeat: true
+    running: root.lockRequested
+    onTriggered: root.queryKeyLane()
+  }
+
+  // FIDO2 setup writes this PAM service (only with face set up) and both
+  // removals delete it: its presence is half of the lane's "available"
+  // check, the daemon's key_lane answer the other half.
+  FileView {
+    path: "/etc/pam.d/omarchy-lock-fido2"
+    watchChanges: true
+    printErrors: false
+    onLoaded: {
+      root.fido2Configured = true
+      root.startFido2()
+    }
+    onLoadFailed: root.fido2Configured = false
+    onFileChanged: reload()
+  }
+
+  PamContext {
     id: facePam
     config: "omarchy-lock-face"
     user: root.userName
@@ -865,7 +1088,7 @@ Item {
     id: faceProbeTimer
     interval: Math.round(root.faceProbeSeconds * 1000)
     repeat: true
-    running: root.lockRequested && root.faceConfigured && !root.previewVisible && !root.faceAuthenticating
+    running: root.lockRequested && root.faceConfigured && !root.faceauthDown && !root.previewVisible && !root.faceAuthenticating
     onTriggered: root.probeFace()
   }
 
