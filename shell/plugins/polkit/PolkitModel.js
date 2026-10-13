@@ -39,11 +39,32 @@ function authorizationLabel(message, tr) {
   return match ? t("polkit.authorizeRunning", "Authorize running '%1'").replace("%1", match[1]) : text
 }
 
+// The question pam_faceauth puts to this agent through polkit's own helper
+// for the cookie of the request the helper serves; the face daemon matches
+// the request to its context by that cookie alone. Exactly this text.
+var FACEAUTH_COOKIE_PROMPT = "faceauth: polkit request cookie"
+
+function isFaceauthCookiePrompt(prompt) {
+  return typeof prompt === "string" && prompt === FACEAUTH_COOKIE_PROMPT
+}
+
+// The answer to that question: the cookie behind this tag, which the
+// module requires, so nothing typed into a prompt shown by mistake is ever
+// taken for a cookie. The tag alone when there is no cookie.
+var FACEAUTH_COOKIE_TAG = "faceauth-cookie "
+
+function faceauthCookieAnswer(cookie) {
+  return FACEAUTH_COOKIE_TAG + String(cookie || "")
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     promptLooksFingerprint: promptLooksFingerprint,
     fingerprintConfiguredFromPamConfig: fingerprintConfiguredFromPamConfig,
     faceConsentConfiguredFromPamConfig: faceConsentConfiguredFromPamConfig,
-    authorizationLabel: authorizationLabel
+    authorizationLabel: authorizationLabel,
+    isFaceauthCookiePrompt: isFaceauthCookiePrompt,
+    faceauthCookieAnswer: faceauthCookieAnswer,
+    FACEAUTH_COOKIE_PROMPT: FACEAUTH_COOKIE_PROMPT
   }
 }

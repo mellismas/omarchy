@@ -88,6 +88,15 @@ Item {
     var flow = polkitAgent ? polkitAgent.flow : null
     if (!flow) return
 
+    // pam_faceauth asks, through polkit's own helper, for the cookie of the
+    // request it serves, so the face card names this request and no other.
+    // Answered at once and never shown; with face not configured the agent
+    // never said it answers, so nothing is given.
+    if (flow.isResponseRequired && PolkitModel.isFaceauthCookiePrompt(flow.inputPrompt)) {
+      flow.submit(PolkitModel.faceauthCookieAnswer(root.faceConfigured ? flow.cookie : ""))
+      return
+    }
+
     currentMessage = String(flow.message || "")
     currentPrompt = String(flow.inputPrompt || "")
     currentSupplementary = String(flow.supplementaryMessage || "")
@@ -128,7 +137,12 @@ Item {
       user: String(Quickshell.env("USER") || ""),
       context_action: String(flow.actionId || ""),
       context_message: String(flow.message || ""),
-      context_cookie: String(flow.cookie || "")
+      context_cookie: String(flow.cookie || ""),
+      // pam_faceauth may ask for that cookie through polkit's helper
+      // (syncFromFlow answers it), which ties this context to the request.
+      // Named by the prompt's own text, so the daemon asks only a shell that
+      // answers exactly that prompt.
+      context_cookie_prompt: PolkitModel.FACEAUTH_COOKIE_PROMPT
     }
     var callerPid = parseInt(String(details["polkit.caller-pid"] || ""), 10)
     var subjectPid = parseInt(String(details["polkit.subject-pid"] || ""), 10)

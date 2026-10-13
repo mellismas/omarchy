@@ -104,4 +104,28 @@ assert(/context_action: String\(flow\.actionId/.test(tell[1]) && /context_messag
 assert(/details\["polkit\.caller-pid"\]/.test(tell[1]) && /details\["polkit\.subject-pid"\]/.test(tell[1]), 'the context carries polkitd\'s caller and subject pids when the flow exposes its details')
 assert(/var details = flow\.details \|\| \{\}/.test(tell[1]), 'a Quickshell without request details still sends the context')
 assert(/if \(flow\.details === undefined && !root\.detailsWarned\) \{\s*root\.detailsWarned = true\s*console\.warn\(/.test(tell[1]), 'a Quickshell without request details is warned about once per shell')
+
+// The face daemon matches a polkit request to its context by polkit's
+// cookie, which pam_faceauth asks the agent for through polkit's own helper:
+// the agent says it answers that prompt, answers it with the request's
+// cookie before anything is shown, and treats no other prompt as it.
+// It names the prompt it answers by its text (a shell that knows another
+// text is never asked this one), and answers with the cookie behind a tag,
+// so nothing typed into a prompt shown by mistake is ever taken for one.
+assert(/context_cookie_prompt: PolkitModel\.FACEAUTH_COOKIE_PROMPT/.test(tell[1]), 'the context names the cookie prompt the agent answers')
+assertEqual(polkit.FACEAUTH_COOKIE_PROMPT, 'faceauth: polkit request cookie', 'the prompt is the face daemon\'s')
+assertEqual(polkit.faceauthCookieAnswer('1-ab-2-3'), 'faceauth-cookie 1-ab-2-3', 'the answer is the tagged cookie')
+assertEqual(polkit.faceauthCookieAnswer(''), 'faceauth-cookie ', 'no cookie is the tag alone')
+assertEqual(polkit.faceauthCookieAnswer(undefined), 'faceauth-cookie ', 'a flow with no cookie answers the tag alone')
+assert(polkit.isFaceauthCookiePrompt('faceauth: polkit request cookie'), 'the cookie prompt is recognized')
+for (const other of ['Password:', 'faceauth: polkit request cookie ', ' faceauth: polkit request cookie', 'Faceauth: polkit request cookie', '', undefined]) {
+  assert(!polkit.isFaceauthCookiePrompt(other), `not the cookie prompt: ${JSON.stringify(other)}`)
+}
+const sync = agent.match(/function syncFromFlow\(\) \{([\s\S]*?)\n  \}/)
+assert(sync, 'the agent syncs from its flow')
+const answer = sync[1].indexOf('PolkitModel.isFaceauthCookiePrompt(flow.inputPrompt)')
+assert(answer !== -1, 'the flow sync answers the cookie prompt')
+assert(answer < sync[1].indexOf('currentPrompt ='), 'the cookie prompt is answered before the prompt is shown')
+assert(answer < sync[1].indexOf('responseRequired = !!flow.isResponseRequired'), 'the cookie prompt never switches the dialog to a password field')
+assert(/flow\.submit\(PolkitModel\.faceauthCookieAnswer\(root\.faceConfigured \? flow\.cookie : ""\)\)\s*return/.test(sync[1]), 'it answers with the request\'s tagged cookie when face is configured, and the tag alone otherwise, then stops')
 JS
