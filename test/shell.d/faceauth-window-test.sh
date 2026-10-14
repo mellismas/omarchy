@@ -168,6 +168,70 @@ assert(/root\.opened = false/.test(expire[1]), 'expiry hides the card')
 const close = consent.match(/function close\(\) \{([\s\S]*?)\n  \}/)
 assert(close && /if \(root\.pending\) root\.answer\(\["--dismiss"\], ""\)/.test(close[1]), 'Dismiss and Escape still say no while pending')
 
+// Live test 2, 2026-10-13: the daemon takes a card down from its side (a
+// head shake, a dismissal, a requester killed or gone) with `shell hide`,
+// which calls close(). A closed card is over, whoever closed it: the next
+// request's summon must be shown, not ignored as a stranger's while the
+// window still holds the old token as pending. This runs the card's own
+// open() and close() against a model of the card.
+{
+  const fnOf = (name) => {
+    const m = consent.match(new RegExp('\\n  function ' + name + '\\(([^)]*)\\) \\{([\\s\\S]*?)\\n  \\}'))
+    return m ? { params: m[1], body: m[2] } : null
+  }
+  const pendingExpr = (consent.match(/readonly property bool pending: (.*)/) || [])[1]
+  assert(pendingExpr, 'the card says which states are pending')
+  const sent = []
+  const card = {
+    opened: false, state: '', message: '', caller: {}, token: '', closedToken: '',
+    riderMinutes: 0, facePresent: false, keyArmed: false, keyPin: false, keyPinSent: false, waiting: false,
+    answer(args, secret) { sent.push(args.join(' ') + ' <- ' + card.token) },
+  }
+  Object.defineProperty(card, 'pending', { get: new Function('root', 'return function() { return ' + pendingExpr + ' }')(card) })
+  const autoClose = { interval: 0, restart() {}, stop() {} }
+  const field = () => ({ text: '', forceActiveFocus() {} })
+  const passwordField = field()
+  const keyPinField = field()
+  const commandArea = { contentY: 0 }
+  const Qt = { callLater: (f) => f() }
+  const quiet = { log() {} }
+  const bind = (name) => {
+    const f = fnOf(name)
+    assert(f, `the card has ${name}()`)
+    return new Function('root', 'autoClose', 'passwordField', 'keyPinField', 'commandArea', 'Qt', 'console',
+      'return function(' + f.params + ') {' + f.body + '}')(card, autoClose, passwordField, keyPinField, commandArea, Qt, quiet)
+  }
+  card.open = bind('open')
+  card.close = bind('close')
+  card.expire = bind('expire')
+  const show = (token, state) => card.open(JSON.stringify({ token, state, message: '', caller: {} }))
+
+  show('A', 'scanning')
+  show('A', 'nod')
+  card.close()
+  assert(sent.includes('--dismiss <- A'), 'a pending card closed says no, with its own token', JSON.stringify(sent))
+  assert(!card.opened, 'a closed card is hidden')
+  show('B', 'scanning')
+  assert(card.opened && card.token === 'B' && card.state === 'scanning', 'the next request\'s summon after a close is shown, not ignored', JSON.stringify({ opened: card.opened, token: card.token, state: card.state }))
+  assert(sent.includes('--ack <- B'), 'and acknowledged to the daemon with its own token', JSON.stringify(sent))
+
+  // A payload for a request whose card was closed, such as a re-send that
+  // crossed the close, changes nothing: the daemon never shows a closed
+  // request again.
+  card.close()
+  const before = sent.length
+  show('B', 'nod')
+  assert(!card.opened && card.token === '' && sent.length === before, 'a late payload for a closed request changes nothing', JSON.stringify({ opened: card.opened, token: card.token, sent: sent.slice(before) }))
+  show('C', 'scanning')
+  assert(card.opened && card.token === 'C', 'and the request after it is still shown')
+
+  // Expiry is not a close: the daemon's next re-send of a live request
+  // brings its card back.
+  card.expire()
+  show('C', 'nod')
+  assert(card.opened && card.token === 'C' && card.state === 'nod', 'a live request\'s re-send after expiry is shown again')
+}
+
 // Ready to nod: after an unanswered nod window the daemon disarms the nods
 // and says so in the payload; the button re-arms them and approves nothing.
 assert(/root\.waiting = payload\.waiting === true/.test(open[1]), 'open() reads waiting from the payload, true only when the daemon says so')

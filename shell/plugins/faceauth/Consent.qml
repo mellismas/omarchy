@@ -71,6 +71,8 @@ FaceAuthOverlay {
     var payload = {}
     try { payload = JSON.parse(String(payloadJson || "{}")) } catch (e) { payload = {} }
     var token = String(payload.token || "")
+    // A request whose card was closed is over (close()).
+    if (token.length > 0 && token === root.closedToken) return
     // While a request is pending the window is that request's: only a
     // payload carrying its token may change what is shown or end it. The
     // daemon serializes requests, so a summon with another token while one
@@ -121,12 +123,23 @@ FaceAuthOverlay {
 
   property string token: ""
   readonly property bool pending: root.state === "scanning" || root.state === "nod" || root.state === "confirming" || root.state === "password" || root.state === "locked"
+  // The request whose card was last closed. The daemon never shows a
+  // request again once its card is closed, so a payload for it that
+  // arrives late (a re-send that crossed the close) changes nothing.
+  property string closedToken: ""
 
   function close() {
     autoClose.stop()
     if (root.pending) root.answer(["--dismiss"], "")
     root.opened = false
     passwordField.text = ""
+    // A closed card is over, whoever closed it: Dismiss or Escape (whose no
+    // above already carries the token), or the daemon's hide after a head
+    // shake or a requester gone. Holding its token as pending would turn
+    // the next request's summon away (live test 2, 2026-10-13).
+    if (root.token.length > 0) root.closedToken = root.token
+    root.state = ""
+    root.token = ""
   }
 
   // The safety net: hide, answer nothing. A live request keeps waiting in
