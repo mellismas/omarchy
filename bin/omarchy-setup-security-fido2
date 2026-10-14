@@ -224,10 +224,12 @@ fi
 # Configure PAM
 setup_pam_config
 
-# Test with sudo
+# Test with sudo, for real: the setup's own sudo calls above leave a
+# timestamp that would pass this test without asking anything.
 echo -e "\nTesting FIDO2 authentication with sudo..."
 echo -e "Touch your FIDO2 key when prompted.\n"
 
+sudo -k
 if sudo echo "FIDO2 authentication test successful"; then
   echo -e "\e[32m\nPerfect! FIDO2 authentication is now configured.\e[0m"
   echo "You can use your FIDO2 key for sudo and polkit authentication."

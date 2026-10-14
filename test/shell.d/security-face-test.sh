@@ -79,6 +79,10 @@ case "${1:-}" in
     shift
     printf '%s\n' "$*"
     ;;
+  -k)
+    # FIDO2 setup clears the sudo cache before that test (round 19).
+    [[ $# == 1 ]] || { echo "unexpected sudo -k: $*" >&2; exit 97; }
+    ;;
   test)
     [[ $2 == -f || $2 == -d ]] || { echo "unexpected test: $*" >&2; exit 97; }
     [[ $2 == -f && -f $(map "$3") || $2 == -d && -d $(map "$3") ]]

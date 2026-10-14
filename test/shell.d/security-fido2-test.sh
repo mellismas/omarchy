@@ -253,6 +253,11 @@ case "${1:-}" in
       reject "$@"
     fi
     ;;
+  -k)
+    if (( $# != 1 )); then
+      reject "$@"
+    fi
+    ;;
   *)
     reject "$@"
     ;;
@@ -457,6 +462,11 @@ grep -Fxq $'sudo\tchmod\t644\t'"$stage_path" "$calls" ||
   fail "FIDO2 setup makes the completed authfile PAM-readable" "$(cat "$calls")"
 grep -Fxq $'sudo\tmv\t-Tf\t'"$stage_path"$'\t'"$authfile" "$calls" ||
   fail "FIDO2 setup atomically publishes the exact privileged stage" "$(cat "$calls")"
+# Round 19 (live test 2): the closing sudo test is a real one. The setup's
+# own sudo calls leave a timestamp that would pass it unasked, so the cache
+# is cleared right before it.
+[[ $(tail -n 2 "$calls") == $'sudo\t-k\nsudo\techo\tFIDO2 authentication test successful' ]] ||
+  fail "FIDO2 setup clears the sudo cache right before its closing test" "$(cat "$calls")"
 ! grep -Fq $'sudo\trm\t' "$calls" ||
   fail "successful setup leaves its cleanup trap inert" "$(cat "$calls")"
 
