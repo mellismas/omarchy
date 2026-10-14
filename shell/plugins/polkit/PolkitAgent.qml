@@ -90,10 +90,11 @@ Item {
 
     // pam_faceauth asks, through polkit's own helper, for the cookie of the
     // request it serves, so the face card names this request and no other.
-    // Answered at once and never shown; with face not configured the agent
-    // never said it answers, so nothing is given.
+    // Answered at once with the question's challenge and never shown, even
+    // when it carries no challenge; with face not configured the agent
+    // never said it answers, so no cookie is given.
     if (flow.isResponseRequired && PolkitModel.isFaceauthCookiePrompt(flow.inputPrompt)) {
-      flow.submit(PolkitModel.faceauthCookieAnswer(root.faceConfigured ? flow.cookie : ""))
+      flow.submit(PolkitModel.faceauthCookieAnswer(flow.inputPrompt, root.faceConfigured ? flow.cookie : ""))
       return
     }
 

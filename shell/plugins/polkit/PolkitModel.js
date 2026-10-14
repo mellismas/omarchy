@@ -39,22 +39,35 @@ function authorizationLabel(message, tr) {
   return match ? t("polkit.authorizeRunning", "Authorize running '%1'").replace("%1", match[1]) : text
 }
 
-// The question pam_faceauth puts to this agent through polkit's own helper
-// for the cookie of the request the helper serves; the face daemon matches
-// the request to its context by that cookie alone. Exactly this text.
-var FACEAUTH_COOKIE_PROMPT = "faceauth: polkit request cookie"
+// How the question pam_faceauth puts to this agent through polkit's own
+// helper, for the cookie of the request the helper serves, starts; the face
+// daemon matches the request to its context by that cookie alone. Exactly
+// this text, then a fresh challenge for that one question.
+var FACEAUTH_COOKIE_PROMPT = "faceauth: polkit cookie challenge "
 
 function isFaceauthCookiePrompt(prompt) {
-  return typeof prompt === "string" && prompt === FACEAUTH_COOKIE_PROMPT
+  return typeof prompt === "string" && prompt.indexOf(FACEAUTH_COOKIE_PROMPT) === 0
 }
 
-// The answer to that question: the cookie behind this tag, which the
-// module requires, so nothing typed into a prompt shown by mistake is ever
-// taken for a cookie. The tag alone when there is no cookie.
+// The question's challenge: 32 lowercase hex characters after its start,
+// or "" for a question without one.
+function faceauthCookieChallenge(prompt) {
+  if (!isFaceauthCookiePrompt(prompt)) return ""
+  var challenge = prompt.slice(FACEAUTH_COOKIE_PROMPT.length)
+  return /^[0-9a-f]{32}$/.test(challenge) ? challenge : ""
+}
+
+// The answer to that question: this tag, the question's challenge and the
+// cookie, which the module requires, so nothing typed into a prompt shown by
+// mistake is ever taken for a cookie. Nothing after the challenge when there
+// is no cookie, and nothing at all, which the module takes as no answer, for
+// a question without a challenge.
 var FACEAUTH_COOKIE_TAG = "faceauth-cookie "
 
-function faceauthCookieAnswer(cookie) {
-  return FACEAUTH_COOKIE_TAG + String(cookie || "")
+function faceauthCookieAnswer(prompt, cookie) {
+  var challenge = faceauthCookieChallenge(prompt)
+  if (!challenge) return ""
+  return FACEAUTH_COOKIE_TAG + challenge + " " + String(cookie || "")
 }
 
 if (typeof module !== "undefined") {
@@ -64,6 +77,7 @@ if (typeof module !== "undefined") {
     faceConsentConfiguredFromPamConfig: faceConsentConfiguredFromPamConfig,
     authorizationLabel: authorizationLabel,
     isFaceauthCookiePrompt: isFaceauthCookiePrompt,
+    faceauthCookieChallenge: faceauthCookieChallenge,
     faceauthCookieAnswer: faceauthCookieAnswer,
     FACEAUTH_COOKIE_PROMPT: FACEAUTH_COOKIE_PROMPT
   }
