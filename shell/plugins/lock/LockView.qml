@@ -20,6 +20,9 @@ Item {
   // A security key unlocks too, while its lane is there: the PAM service
   // and the face daemon's word that it runs the key.
   property bool fido2Available: false
+  // The key lane's own dark state (Service.displaysBlank): it asks the key
+  // only while this is false.
+  property bool keyLaneDark: false
   // faceauth is not running: face and key are hidden, and the view says so.
   property bool faceauthDown: false
   property bool authenticatingPassword: false
@@ -332,7 +335,10 @@ Item {
       anchors.top: fingerprintUnavailableNotice.visible ? fingerprintUnavailableNotice.bottom : inputField.bottom
       anchors.topMargin: 18
       anchors.horizontalCenter: inputField.horizontalCenter
-      visible: root.fido2Available
+      // Only while the lane can be asking: it asks the key only while the
+      // lock's displays are lit, by the lane's own reckoning, never one
+      // screen's DPMS poll (round 19, Opus 19 F2 and 19b G2).
+      visible: root.fido2Available && !root.keyLaneDark
       text: Commons.I18n.t("lock.keyTouch")
       color: Commons.Color.lock.placeholder
       font.family: Style.font.family

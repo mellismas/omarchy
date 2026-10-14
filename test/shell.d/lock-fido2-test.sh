@@ -43,13 +43,14 @@ function lane() {
   const calls = { start: 0, abort: 0, retry: 0, unlock: 0, stop: 0 }
   const scope = {
     lockRequested: true, fido2Available: true, fido2Authenticating: false,
+    displaysBlank: false,
     sessionLock: { secure: true },
     PamResult: { Success: 0, Failed: 7 },
     fido2Pam: { active: false, start() { calls.start += 1; this.active = true; return true }, abort() { calls.abort += 1; this.active = false } },
     fido2RetryTimer: { running: false, restart() { this.running = true; calls.retry += 1 }, stop() { this.running = false; calls.stop += 1 } },
     finishUnlock() { calls.unlock += 1 },
   }
-  for (const name of ['startFido2', 'settleFido2']) {
+  for (const name of ['startFido2', 'settleFido2', 'pauseFido2']) {
     scope[name] = compileIn(scope, blockOf(serviceQml, 'function ' + name + '('))
   }
   return { scope, calls }
@@ -81,6 +82,27 @@ assert(/interval: 2000/.test(retryTimer) && /onTriggered: root\.startFido2\(\)/.
 scope.fido2Pam.start = () => false
 scope.startFido2()
 assert(!scope.fido2Authenticating && calls.retry === 1, 'an attempt that cannot start is retried after the pause, never spun')
+
+// Round 19 (live test 2): the key is asked only while the lock's displays
+// are lit. A dark lock starts no attempt; blanking ends the one running and
+// its retry, and what the end settles asks nothing again; a wake asks at
+// once.
+;({ scope, calls } = lane())
+scope.displaysBlank = true
+scope.startFido2()
+assert(calls.start === 0 && !scope.fido2Authenticating, 'no attempt while the displays are dark')
+;({ scope, calls } = lane())
+scope.startFido2()
+scope.fido2Pam.abort = function() { calls.abort += 1; this.active = false; scope.settleFido2(scope.PamResult.Failed) }
+scope.displaysBlank = true
+scope.pauseFido2()
+assert(calls.abort === 1 && !scope.fido2Pam.active && !scope.fido2Authenticating, 'blanking ends the attempt and frees the key')
+assert(!scope.fido2RetryTimer.running && calls.retry === 0, 'and nothing asks again while dark')
+const blankHandler = blockOf(serviceQml, 'onDisplaysBlankChanged: {')
+assert(/if \(displaysBlank\) root\.pauseFido2\(\)/.test(blankHandler) && /else root\.startFido2\(\)/.test(blankHandler), 'the displays going dark pause the key, and lighting up asks at once')
+scope.displaysBlank = false
+scope.startFido2()
+assert(calls.start === 2 && scope.fido2Authenticating, 'a wake asks the key again')
 
 // The PAM context: its own service, a question it cannot answer ends the
 // attempt, and both ends of an attempt go through the one settle.
@@ -313,6 +335,13 @@ assert(/visible: root\.faceauthDown/.test(downNotice) && /text: Commons\.I18n\.t
 const hint = viewQml.split(/\bText \{/).slice(1).find(b => /objectName: "fido2Hint"/.test(b)) || ''
 assert(/visible: root\.fido2Available/.test(hint) && /text: Commons\.I18n\.t\("lock\.keyTouch"\)/.test(hint) && enShell['lock.keyTouch'] === 'Or touch your security key' && /textFormat: Text\.PlainText/.test(hint), 'the lock view hints at the key while the lane is available')
 assert((serviceQml.match(/fido2Available: root\.fido2Available/g) || []).length === 2, 'the lock and its preview both pass the lane on')
+// Opus 19 F2: the hint follows the lane, which asks the key only while the
+// displays are lit, so a panel lit behind the lock's back never promises a
+// touch nothing is asking for; a keypress wakes both.
+assert(/visible: root\.fido2Available && !root\.keyLaneDark/.test(hint), 'the key hint shows only while the lane can be asking')
+// Opus 19b G2: the hint reads the lane's own dark state, never a screen's
+// DPMS poll, so with a video wallpaper the two cannot disagree.
+assert((serviceQml.match(/keyLaneDark: root\.displaysBlank/g) || []).length === 2, 'the lock and its preview pass the lane\'s dark state on')
 
 // The lane's stack is the daemon's, never pam_u2f: the one stack setup
 // writes for it, and no lock screen stack anywhere in the tree.

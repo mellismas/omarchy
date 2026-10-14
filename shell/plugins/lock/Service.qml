@@ -616,9 +616,10 @@ Item {
   // probe says the lane is there. The daemon's check waits for a touch up
   // to its own deadline and answers at once when it cannot run; either way
   // the lane asks again two seconds after an attempt ends, for as long as
-  // the session is locked.
+  // the session is locked and its displays are lit.
   function startFido2() {
     if (!lockRequested || !sessionLock.secure || !fido2Available) return
+    if (displaysBlank) return
     if (fido2Pam.active || fido2Authenticating) return
 
     fido2Authenticating = true
@@ -626,6 +627,23 @@ Item {
       fido2Authenticating = false
       fido2RetryTimer.restart()
     }
+  }
+
+  // The key is asked only while the lock's displays are lit (round 19,
+  // live test 2), as the face scan is: a dark lock is nobody at the
+  // keyboard, and a key asked all night blinks all night and logs a check
+  // every half minute. Blanking ends the attempt, so the daemon stops its
+  // check and cancels the key's wait; a wake (a key, a click, a move, or
+  // the face probe finding the owner) asks again at once.
+  function pauseFido2() {
+    fido2RetryTimer.stop()
+    fido2Authenticating = false
+    if (fido2Pam.active) fido2Pam.abort()
+  }
+
+  onDisplaysBlankChanged: {
+    if (displaysBlank) root.pauseFido2()
+    else root.startFido2()
   }
 
   // The lock screen's reserved channel to faceauthd (round 7): one
@@ -800,6 +818,7 @@ Item {
         faceConfigured: root.faceConfigured && !root.faceauthDown
         faceState: root.faceState
         fido2Available: root.fido2Available
+        keyLaneDark: root.displaysBlank
         faceauthDown: root.faceauthDown
         authenticatingPassword: root.authenticatingPassword
         failureMessage: root.failureMessage
@@ -842,6 +861,7 @@ Item {
       faceConfigured: root.faceConfigured && !root.faceauthDown
       faceState: root.faceState
       fido2Available: root.fido2Available
+      keyLaneDark: root.displaysBlank
       faceauthDown: root.faceauthDown
       authenticatingPassword: false
       failureMessage: ""
