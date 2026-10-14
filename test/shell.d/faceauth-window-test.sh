@@ -168,6 +168,99 @@ assert(/root\.opened = false/.test(expire[1]), 'expiry hides the card')
 const close = consent.match(/function close\(\) \{([\s\S]*?)\n  \}/)
 assert(close && /if \(root\.pending\) root\.answer\(\["--dismiss"\], ""\)/.test(close[1]), 'Dismiss and Escape still say no while pending')
 
+// Round 19 (live test 2): the card logs each answer it sends by kind and
+// how consent-answer ended, and each close, with whether it said no, so an
+// answer that never reached the daemon leaves a trace. Never the token,
+// the password or the PIN.
+{
+  const nextAnswer = consent.match(/function nextAnswer\(\) \{([\s\S]*?)\n  \}/)
+  assert(nextAnswer && /console\.log\("omarchy faceauth: answer " \+ next\.kind \+ " sent"\)/.test(nextAnswer[1]), 'each answer is logged by kind as it goes')
+  assert(/answerProc\.kind = next\.kind/.test(nextAnswer[1]), 'the running answer keeps its kind')
+  const answerFn = consent.match(/function answer\(args, secret\) \{([\s\S]*?)\n  \}/)
+  assert(answerFn && /kind: args\.length > 0 \? args\[0\] : "password"/.test(answerFn[1]), 'an answer\'s kind is its flag, or password')
+  const procBlock = consent.match(/\n  Process \{\n    id: answerProc\n([\s\S]*?)\n  \}/)
+  assert(procBlock && /onExited: function\(exitCode, exitStatus\) \{[\s\S]*console\.log\("omarchy faceauth: answer " \+ kind \+ " ended with " \+ exitCode\)/.test(procBlock[1]), 'how each answer ended is logged')
+  // A no that did not get through lets go of the card's close, so the
+  // daemon's re-send of a request still waiting shows its card again
+  // (Codex 19, 1), whether consent-answer exited non-zero or never started
+  // at all, which ends with no exit and is caught when the process stops
+  // running. The card is not redrawn from its own last payload (Codex 19b
+  // N1): that could revive a request the daemon had already ended and
+  // turn the next request away; a request that is over is never re-sent.
+  const fnOf = (name) => {
+    const m = consent.match(new RegExp('\\n  function ' + name + '\\(([^)]*)\\) \\{([\\s\\S]*?)\\n  \\}'))
+    return m ? { params: m[1], body: m[2] } : null
+  }
+  const notTaken = fnOf('noNotTaken')
+  assert(notTaken, 'the card has noNotTaken()')
+  const card = (over) => {
+    const root = Object.assign({ closedToken: 'A', opened: false, opens: 0 }, over)
+    root.open = () => { root.opens += 1 }
+    root.noNotTaken = new Function('root', 'return function(' + notTaken.params + ') {' + notTaken.body + '}')(root)
+    return root
+  }
+  let c = card({})
+  c.noNotTaken('A')
+  assert(c.closedToken === '' && c.opens === 0, 'a no that did not get through lets go of the close and draws nothing itself', JSON.stringify(c))
+  c = card({ closedToken: 'B' })
+  c.noNotTaken('A')
+  assert(c.closedToken === 'B', 'another request\'s close is left alone')
+  assert(!/lastPayload/.test(consent), 'the card keeps no payload to redraw')
+  assert(/if \(kind === "--dismiss" && exitCode !== 0\) root\.noNotTaken\(answerToken\)/.test(procBlock[1]), 'a failed no lets go of its close')
+  const failed = fnOf('answerFailedToStart')
+  assert(failed, 'the card has answerFailedToStart()')
+  const stopped = procBlock[1].match(/    onRunningChanged: \{([\s\S]*?)\n    \}/)
+  assert(stopped, 'the answer process handles its end')
+  const settle = (launched, kind) => {
+    const calls = []
+    const root = { nextAnswer() {}, noNotTaken(t) { calls.push(t) } }
+    root.answerFailedToStart = new Function('root', 'console', 'return function(' + failed.params + ') {' + failed.body + '}')(root, { log() {} })
+    const proc = { running: false, launched, kind, answerToken: 'A' }
+    new Function('proc', 'root', 'Qt', 'with (proc) {' + stopped[1] + '}')(proc, root, { callLater(f) { f() } })
+    return calls
+  }
+  assert(JSON.stringify(settle(false, '--dismiss')) === JSON.stringify(['A']), 'a no that never started lets go of its close')
+  assert(settle(false, '--ack').length === 0 && settle(true, '--dismiss').length === 0, 'nothing else does here')
+  assert(/answerProc\.launched = false/.test(nextAnswer[1]) && /launched = true/.test(procBlock[1]), 'each launch is marked started only when it starts')
+  assert(/answerProc\.answerToken = next\.token/.test(nextAnswer[1]) && /token: root\.token/.test(answerFn[1]), 'each answer keeps the token it was sent for')
+  const closeFn = consent.match(/function close\(\) \{([\s\S]*?)\n  \}/)
+  assert(closeFn && /console\.log\("omarchy faceauth: card closed, " \+ \(wasPending \? "no sent" : "nothing pending"\)\)/.test(closeFn[1]), 'each close is logged, with whether it said no')
+  for (const line of consent.split('\n').filter(l => /console\.log/.test(l))) {
+    assert(!/root\.token|token\b(?! (that|the|it))|secret|password(Field)?\.text|pin\b/i.test(line.replace(/carry the pending request's token/, '')), 'no log line carries a secret: ' + line.trim())
+  }
+}
+
+// Round 19 (live test 2, Mike: "deny and kill is supposed to deny and kill
+// the pid"): Deny and kill says no first, then asks faceauth to end the
+// process the daemon pinned, by pid and pidfs id, so a pid another process
+// holds by then is never signalled. With no pinned process it kills
+// nothing and still says no, and the button shows only for a pinned one.
+{
+  const fnOf = (name) => {
+    const m = consent.match(new RegExp('\\n  function ' + name + '\\(([^)]*)\\) \\{([\\s\\S]*?)\\n  \\}'))
+    return m ? { params: m[1], body: m[2] } : null
+  }
+  const f = fnOf('killRequester')
+  assert(f, 'the card has killRequester()')
+  assert(!/\/usr\/bin\/kill/.test(consent), 'the card never runs /usr/bin/kill with a bare pid')
+  const run = (caller) => {
+    const order = []
+    const root = { caller, close() { order.push('close') } }
+    const killProc = { command: [], set running(v) { if (v) order.push('kill ' + this.command.join(' ')) } }
+    new Function('root', 'killProc', f.body)(root, killProc)
+    return order
+  }
+  const order = run({ kill_pid: 4242, kill_ino: '77' })
+  assert(JSON.stringify(order) === JSON.stringify(['close', 'kill /usr/bin/faceauth kill-requester --pid 4242 --ino 77']), 'the no goes first, then the pinned kill', JSON.stringify(order))
+  for (const caller of [{ kill_pid: 4242 }, { kill_pid: 4242, kill_ino: '0' }, { kill_pid: 4242, kill_ino: '7x' }, { kill_pid: 1, kill_ino: '77' }, { kill_pid: 0, kill_ino: '77' }, {}]) {
+    const o = run(caller)
+    assert(JSON.stringify(o) === JSON.stringify(['close']), 'no kill without a pinned process, and still the no: ' + JSON.stringify(caller), JSON.stringify(o))
+  }
+  const killButton = consent.split(/\bButton \{/).slice(1).find(b => /faceConsent\.denyAndKill/.test(b))
+  assert(/visible: root\.verified && root\.killPinned/.test(killButton), 'Deny and kill shows only for a pinned process')
+  assert(/readonly property bool killPinned: Number\(\(root\.caller \|\| \{\}\)\.kill_pid \|\| 0\) > 1 && \/\^\[1-9\]\[0-9\]\*\$\/\.test\(String\(\(root\.caller \|\| \{\}\)\.kill_ino \|\| ""\)\)/.test(consent), 'pinned means a pid past 1 and a pidfs id')
+}
+
 // Live test 2, 2026-10-13: the daemon takes a card down from its side (a
 // head shake, a dismissal, a requester killed or gone) with `shell hide`,
 // which calls close(). A closed card is over, whoever closed it: the next

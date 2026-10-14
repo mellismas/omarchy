@@ -130,6 +130,7 @@ FaceAuthOverlay {
 
   function close() {
     autoClose.stop()
+    var wasPending = root.pending
     if (root.pending) root.answer(["--dismiss"], "")
     root.opened = false
     passwordField.text = ""
@@ -140,6 +141,9 @@ FaceAuthOverlay {
     if (root.token.length > 0) root.closedToken = root.token
     root.state = ""
     root.token = ""
+    // Each close is logged, with whether it said no (round 19): a no that
+    // never reached the daemon leaves a trace.
+    console.log("omarchy faceauth: card closed, " + (wasPending ? "no sent" : "nothing pending"))
   }
 
   // The safety net: hide, answer nothing. A live request keeps waiting in
@@ -194,7 +198,7 @@ FaceAuthOverlay {
   property var answerQueue: []
 
   function answer(args, secret) {
-    root.answerQueue = root.answerQueue.concat([{ args: args, lines: [root.token].concat(secret.length > 0 ? [secret] : []) }])
+    root.answerQueue = root.answerQueue.concat([{ kind: args.length > 0 ? args[0] : "password", token: root.token, args: args, lines: [root.token].concat(secret.length > 0 ? [secret] : []) }])
     root.nextAnswer()
   }
 
@@ -210,10 +214,32 @@ FaceAuthOverlay {
     if (answerProc.running || root.answerQueue.length === 0) return
     var next = root.answerQueue[0]
     root.answerQueue = root.answerQueue.slice(1)
+    // Logged by kind alone, never its lines (round 19).
+    answerProc.kind = next.kind
+    answerProc.answerToken = next.token
+    answerProc.launched = false
+    console.log("omarchy faceauth: answer " + next.kind + " sent")
     answerProc.lines = next.lines
     answerProc.stdinEnabled = true
     answerProc.command = ["/usr/bin/faceauth", "consent-answer"].concat(next.args)
     answerProc.running = true
+  }
+
+  // An answer whose consent-answer never started (Codex 19, 1): logged, and
+  // a no among them never reached the daemon.
+  function answerFailedToStart(kind, token) {
+    console.log("omarchy faceauth: answer " + kind + " did not start")
+    if (kind === "--dismiss") root.noNotTaken(token)
+  }
+
+  // A no for `token` that the daemon did not take (Codex 19, 1): the card
+  // lets go of its close, so a request still waiting, its key armed, gets
+  // its card back with the daemon's next re-send. It draws nothing itself
+  // (Codex 19b N1): a request the daemon has ended is never re-sent, and a
+  // card redrawn from its last payload could revive one and turn the next
+  // request away.
+  function noNotTaken(token) {
+    if (token.length > 0 && root.closedToken === token) root.closedToken = ""
   }
 
   function submitPassword() {
@@ -226,15 +252,29 @@ FaceAuthOverlay {
   Process {
     id: answerProc
     property var lines: []
+    property string kind: ""
+    property string answerToken: ""
+    // Whether this launch started (Codex 19, 1): one that fails to start
+    // ends with no exit at all, and is caught when it stops running.
+    property bool launched: false
     stdinEnabled: true
     // Its lines, then the end of its stdin, so consent-answer reads to it.
     onStarted: {
+      launched = true
       for (var i = 0; i < lines.length; i++) write(lines[i] + "\n")
       lines = []
       stdinEnabled = false
     }
+    // How it ended, by kind (round 19): consent-answer exits 0 when the
+    // daemon took the answer.
+    onExited: function(exitCode, exitStatus) {
+      console.log("omarchy faceauth: answer " + kind + " ended with " + exitCode)
+      // A no that did not get through lets go of the card's close.
+      if (kind === "--dismiss" && exitCode !== 0) root.noNotTaken(answerToken)
+    }
     // Ended, or failed to start: the next answer's turn.
     onRunningChanged: {
+      if (!running && !launched) root.answerFailedToStart(kind, answerToken)
       if (!running) Qt.callLater(root.nextAnswer)
     }
   }
@@ -268,13 +308,21 @@ FaceAuthOverlay {
     root.answer(["--passwordless", root.passwordlessMinutes], "")
   }
 
+  // Deny and kill (round 19, live test 2): the no first, then faceauth ends
+  // the process the daemon pinned for this card, named by pid and pidfs id,
+  // so a pid another process holds by then is never signalled. With no
+  // pinned process the button is hidden, and this kills nothing.
+  readonly property bool killPinned: Number((root.caller || {}).kill_pid || 0) > 1 && /^[1-9][0-9]*$/.test(String((root.caller || {}).kill_ino || ""))
+
   function killRequester() {
-    var pid = Number((root.caller || {}).kill_pid || 0)
-    if (pid > 1) {
-      killProc.command = ["/usr/bin/kill", "-TERM", String(pid)]
+    var caller = root.caller || {}
+    var pid = Number(caller.kill_pid || 0)
+    var ino = String(caller.kill_ino || "")
+    root.close()
+    if (pid > 1 && /^[1-9][0-9]*$/.test(ino)) {
+      killProc.command = ["/usr/bin/faceauth", "kill-requester", "--pid", String(pid), "--ino", ino]
       killProc.running = true
     }
-    root.close()
   }
 
   Process { id: killProc }
@@ -521,9 +569,9 @@ FaceAuthOverlay {
             anchors.verticalCenter: parent.verticalCenter
 
             Button {
-              // Only when the daemon could name the requester: for a plain
-              // polkit action there is no known process to end.
-              visible: root.verified
+              // Only when the daemon could name the requester and pinned it:
+              // for a plain polkit action there is no known process to end.
+              visible: root.verified && root.killPinned
               anchors.verticalCenter: parent.verticalCenter
               text: Commons.I18n.t("faceConsent.denyAndKill")
               bordered: true
