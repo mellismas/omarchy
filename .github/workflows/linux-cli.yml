@@ -30,6 +30,8 @@ jobs:
           echo "$RUNNER_TEMP/cli-tools/usr/bin" >> "$GITHUB_PATH"
       - name: Run CLI and editor fixtures
         run: |
+          # The inhibitor fixture requires an owner-private runtime directory.
+          sudo install -d -m 700 -o "$(id -u)" -g "$(id -g)" "/run/user/$(id -u)"
           ./test/cli
           ./test/shell.d/vscode-theme-test.sh
           export OMARCHY_PATH="$GITHUB_WORKSPACE"
@@ -52,6 +54,8 @@ jobs:
           persist-credentials: false
       - name: Run CLI and editor fixtures
         run: |
+          # Containers do not create a login-session runtime directory.
+          install -d -m 700 "/run/user/$(id -u)"
           ./test/cli
           ./test/shell.d/vscode-theme-test.sh
           export OMARCHY_PATH="$GITHUB_WORKSPACE"
