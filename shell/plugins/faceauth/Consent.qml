@@ -123,6 +123,16 @@ FaceAuthOverlay {
 
   property string token: ""
   readonly property bool pending: root.state === "scanning" || root.state === "nod" || root.state === "confirming" || root.state === "password" || root.state === "locked"
+  // The daemon counts nods only from the scan's match. The status line
+  // shows that moment in the accent and in bold, so a nod made while the
+  // face was still being looked for, and not counted, is not taken for one
+  // that was. A card waiting for "Ready to nod" counts none and stays plain,
+  // and so does one whose face has left the camera's view: the daemon counts
+  // nothing until it is back. A card that names a passwordless rider stays
+  // plain too: the daemon holds its nods back a moment, and the eye belongs
+  // on the rider's warning.
+  readonly property bool nodNow: root.state === "nod" && !root.waiting && root.facePresent && root.riderMinutes === 0
+  readonly property color statusColor: root.state === "denied" ? Commons.Color.polkit.textError : (root.nodNow ? root.accent : root.foreground)
   // The request whose card was last closed. The daemon never shows a
   // request again once its card is closed, so a payload for it that
   // arrives late (a re-send that crossed the close) changes nothing.
@@ -433,7 +443,7 @@ FaceAuthOverlay {
           Text {
             text: root.state === "approved" ? "󰖎" : (root.state === "denied" ? "󰅙" : "󰵃")
             textFormat: Text.PlainText
-            color: root.state === "denied" ? Commons.Color.polkit.textError : root.foreground
+            color: root.statusColor
             font.family: root.fontFamily
             font.pixelSize: Style.font.iconLarge
             anchors.verticalCenter: parent.verticalCenter
@@ -443,9 +453,10 @@ FaceAuthOverlay {
             width: parent.width - Style.space(48)
             text: root.message
             textFormat: Text.PlainText
-            color: root.state === "denied" ? Commons.Color.polkit.textError : root.foreground
+            color: root.statusColor
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
+            font.bold: root.nodNow
             wrapMode: Text.Wrap
             anchors.verticalCenter: parent.verticalCenter
           }

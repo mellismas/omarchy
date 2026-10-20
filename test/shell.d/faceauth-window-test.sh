@@ -133,6 +133,19 @@ for (const state of ['scanning', 'nod', 'confirming', 'password', 'locked']) {
   assert(pendingLine.includes(`root.state === "${state}"`), `${state} is a pending state`, pendingLine)
 }
 
+// Nods count only from the scan's match: the card shows that moment in the
+// accent and in bold, so a nod made while the face was still being looked
+// for is not taken for one that counted. A card waiting for "Ready to nod"
+// counts none and stays plain, and so does a card whose face has left the
+// camera's view, since the daemon counts no nod until it is back, and so
+// does a card that names a passwordless rider: the daemon holds its nods
+// back, and the eye belongs on the rider's warning, not on a hurry to nod.
+assert(/readonly property bool nodNow: root\.state === "nod" && !root\.waiting && root\.facePresent && root\.riderMinutes === 0/.test(consent), 'the card knows when nods count: the face in view and no rider named')
+assert(/readonly property color statusColor: root\.state === "denied" \? Commons\.Color\.polkit\.textError : \(root\.nodNow \? root\.accent : root\.foreground\)/.test(consent), 'the status line takes the accent while nods count, red for a refusal')
+const statusRow = (consent.match(/\n        Row \{\n          spacing: Style\.spacing\.md\n([\s\S]*?)\n        \}\n/) || [])[1] || ''
+assert((statusRow.match(/color: root\.statusColor/g) || []).length === 2, 'the status icon and message both follow it', statusRow)
+assert(/text: root\.message[\s\S]*font\.bold: root\.nodNow/.test(statusRow), 'the message is bold while nods count')
+
 assert(!/queued/.test(consent), 'the window knows no queued state; a waiting request is a notification, not a second window')
 
 // One rule covers the consent and the enrollment namespaces, the way
