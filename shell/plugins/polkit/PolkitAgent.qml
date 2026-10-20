@@ -175,6 +175,10 @@ Item {
     closing = false
     refusing = false
     submitted = false
+    // The close (endFlow) can hand this request a failure still flashing
+    // from the one before it: that flash is not this request's.
+    errorTimer.stop()
+    errorFlash = false
     passwordInput.text = ""
     refreshLidState()
     syncFromFlow()
@@ -206,6 +210,21 @@ Item {
     closing = true
     closeTimer.restart()
     if (flow) flow.cancelAuthenticationRequest()
+  }
+
+  // A request that ends on its own (granted, or cancelled by polkit) has
+  // already left polkitAgent.flow when its flow says so, so the Connections
+  // below never hear the success or the cancel. The card gets the same short
+  // close from here instead, which also hands it to a queued request without
+  // unmapping in between. A face request never showed the card, so it is only
+  // cleared: holding it would flash the password card after a nod.
+  function endFlow() {
+    if (faceConfigured && !responseRequired && !submitted && !errorFlash) {
+      resetSnapshot()
+    } else {
+      closing = true
+      closeTimer.restart()
+    }
   }
 
   function triggerFailureFeedback() {
@@ -279,7 +298,7 @@ Item {
       }
       onIsActiveChanged: {
         if (isActive) root.syncFromFlow()
-        else if (!root.closing) root.resetSnapshot()
+        else if (!root.closing) root.endFlow()
       }
       onIsRegisteredChanged: {
         if (isRegistered) console.log("omarchy polkit agent registered")

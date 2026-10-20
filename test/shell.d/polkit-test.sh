@@ -90,6 +90,27 @@ assert(/Qt\.callLater\(root\.cancelRequest\)/.test(failed[1]), 'the agent cancel
 assert(/root\.refusing = true/.test(failed[1]), 'the agent marks the refusal before the cancel lands')
 assert(/dialogVisible: \(agentActive \|\| closing\) && !faceMode && !refusing/.test(agent), 'the dialog stays hidden while a face refusal is being canceled')
 assert(failed[1].indexOf('return') !== -1 && failed[1].indexOf('return') < failed[1].indexOf('root.triggerFailureFeedback()'), 'no failure feedback is shown for a face refusal')
+// A request that ends on its own has left polkitAgent.flow before its flow
+// says so, so the end is handled where isActive drops: a password card gets
+// the short close, which also hands it to a queued request without
+// unmapping, and a face request is only cleared, so no password card
+// flashes after a nod. Face mode is told by face mode's own test.
+const active = agent.match(/onIsActiveChanged: \{([\s\S]*?)\n      \}/)
+assert(active && /else if \(!root\.closing\) root\.endFlow\(\)/.test(active[1]), 'a request that ends on its own goes through endFlow')
+const end = agent.match(/function endFlow\(\) \{([\s\S]*?)\n  \}/)
+assert(end, 'the agent ends a flow')
+assert(/\} else \{\s*closing = true\s*closeTimer\.restart\(\)\s*\}/.test(end[1]), 'a password card gets the short close')
+assert(/\{\s*resetSnapshot\(\)\s*\} else/.test(end[1]), 'a face request is only cleared')
+const faceMode = (agent.match(/readonly property bool faceMode: (.*)/) || [])[1]
+assertEqual((end[1].match(/if \((.*)\) \{/) || [])[1], faceMode && faceMode.replace('agentActive && ', ''), 'endFlow tells a face request by face mode without the active flow')
+// The close can hand a queued request a failure still flashing from the
+// request before; it belongs to that one, so a new flow clears it before
+// it reads its own, or the next card starts red, read-only, and out of
+// face mode.
+const begin = agent.match(/function beginFlow\(\) \{([\s\S]*?)\n  \}/)
+assert(begin, 'the agent begins a flow')
+const cleared = Math.max(begin[1].indexOf('errorTimer.stop()'), begin[1].indexOf('errorFlash = false'))
+assert(begin[1].includes('errorTimer.stop()') && begin[1].includes('errorFlash = false') && cleared < begin[1].indexOf('syncFromFlow()'), 'a new flow drops the last one\'s failure flash before it syncs')
 // The daemon labels a request with a context only when it came over a
 // connection from the very process systemd says connected polkit's helper:
 // the agent itself. A child process (the faceauth CLI) would be a different
