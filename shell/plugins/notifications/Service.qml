@@ -10,7 +10,6 @@ import Quickshell.Io
 import Quickshell.Wayland
 import Quickshell.Hyprland
 import Quickshell.Services.Notifications
-import Quickshell.Services.Pipewire
 import qs.Commons
 import qs.Commons as Commons
 
@@ -19,7 +18,6 @@ import "Security.js" as Security
 import "Layout.js" as Layout
 import "Markup.js" as Markup
 import "Delivery.js" as Delivery
-import "Settings.js" as Settings
 import "Icons.js" as Icons
 
 Item {
@@ -28,140 +26,40 @@ Item {
   // Injected by omarchy-shell (the first-party service loader).
   property var shell: null
 
-  // ------------------------------------------------------------- settings
-  //
-  // shell.json's `notifications` object; Settings.resolve fills every default.
-  readonly property var preferences: Settings.resolve(shell && shell.shellConfig ? shell.shellConfig.notifications : null)
-
-  function setSetting(key, value) {
-    var values = {}
-    values[key] = value
-    setSettings(values)
-  }
-
-  function setSettings(values) {
-    if (!shell || typeof shell.mutateShellConfig !== "function") return
-    shell.mutateShellConfig(function(config) {
-      if (!Util.isPlainObject(config.notifications)) config.notifications = {}
-      for (var key in values) config.notifications[key] = values[key]
-    })
-  }
-
-  readonly property string displayMode: preferences.displayMode
-  readonly property string displayName: preferences.displayName
-  readonly property bool stepsAside: preferences.fullscreenOverlay === "all"
-  readonly property bool offerSnoozeWhenSharing: preferences.offerSnoozeWhenSharing
-  onStepsAsideChanged: hyprRefresh.restart()
-
-  // How many sources, held notifications per source, and recent ones the panel lists.
-  readonly property int sourceLimit: 8
-  readonly property int heldPerSource: 10
-  readonly property int recentCount: 5
-
-  // A shorter retention applies at once to what is already kept.
-  readonly property int historyHours: preferences.historyHours
-  onHistoryHoursChanged: currentHistory()
-
   // ------------------------------------------------------------- displays
   //
-  // "active" places a new deck on the focused output and keeps it there;
-  // "specific" pins one output; "all" mirrors the deck on every output.
+  // A new deck lands on the focused output and stays there until it empties.
   property string deckDisplayName: ""
   readonly property var displayNames: Quickshell.screens.map(function(screen) { return screen.name })
   readonly property string focusedDisplayName: {
     var name = Hyprland.focusedMonitor ? Hyprland.focusedMonitor.name : ""
     return displayNames.indexOf(name) >= 0 ? name : (displayNames[0] || "")
   }
-  readonly property string configuredDisplayName: displayMode === "specific" && displayNames.indexOf(displayName) >= 0
-    ? displayName : focusedDisplayName
-  readonly property string targetDisplayName: {
-    var wanted = focusedDisplayName
-    if (displayMode === "specific" && displayNames.indexOf(displayName) >= 0) wanted = configuredDisplayName
-    else if (displayNames.indexOf(deckDisplayName) >= 0) wanted = deckDisplayName
-    return wanted
-  }
+  readonly property string targetDisplayName: displayNames.indexOf(deckDisplayName) >= 0 ? deckDisplayName : focusedDisplayName
   onDisplayNamesChanged: {
     if (deckDisplayName && displayNames.indexOf(deckDisplayName) < 0)
-      deckDisplayName = configuredDisplayName
+      deckDisplayName = focusedDisplayName
   }
-  onDisplayModeChanged: { if (toasts.count > 0) deckDisplayName = configuredDisplayName }
-  onDisplayNameChanged: { if (displayMode === "specific" && toasts.count > 0) deckDisplayName = configuredDisplayName }
   function pinDeckDisplay() {
-    if (toasts.count === 0) deckDisplayName = configuredDisplayName
+    if (toasts.count === 0) deckDisplayName = focusedDisplayName
   }
 
   function showsOn(name) {
-    return displayMode === "all" || name === targetDisplayName
+    return name === targetDisplayName
   }
 
   // ------------------------------------------------------------- quiet
   //
-  // A verification code was asked for a moment ago and expires in minutes, so
-  // by default it gets through quiet. The panel's key button closes that hole.
-  property bool codesBypassQuiet: true
-  function setCodesBypassQuiet(value) {
-    if (!!value === codesBypassQuiet) return
-    codesBypassQuiet = !!value
-    saveQuiet()
-  }
-
   property bool doNotDisturb: false
-  property double silencedSince: 0
   function setDoNotDisturb(value) {
     var on = !!value
     if (on === doNotDisturb) return
-    if (on) silencedSince = Date.now() / 1000
     doNotDisturb = on
     saveQuiet()
   }
 
-  // Undoes both silencing and snoozing everything.
-  function letEverythingThrough() {
-    setDoNotDisturb(false)
-    unsnooze(globalKey)
-  }
-
-  readonly property bool quiet: doNotDisturb || globalSnoozeUntil > 0
-
-  // ---------------------------------------------------- screen sharing
-  //
-  // Watch the portal's PipeWire stream lifetime rather than frame activity,
-  // which screenshots and VNC also produce. Sharing only offers a timed snooze.
-  readonly property var sharingCandidates: {
-    var nodes = Pipewire.nodes.values, out = []
-    for (var i = 0; i < nodes.length && out.length < 64; i++)
-      if (nodes[i].type === PwNodeType.VideoSource) out.push(nodes[i])
-    return out
-  }
-  PwObjectTracker { objects: service.sharingCandidates }
-  readonly property int sharingStreams: {
-    if (!Pipewire.ready) return 0
-    var count = 0
-    for (var i = 0; i < sharingCandidates.length; i++) {
-      var node = sharingCandidates[i]
-      if (!node.ready) continue
-      var props = node.properties
-      if (props["media.class"] === "Video/Source"
-          && String(props["media.name"] || "").indexOf("xdph-streaming-") === 0) count++
-    }
-    return count
-  }
-  readonly property bool sharingActive: sharingStreams > 0
-  readonly property bool sharingDetectionAvailable: Pipewire.ready
-  property bool sharingOfferHandled: false
-  readonly property bool sharingOfferPending: offerSnoozeWhenSharing && sharingActive
-    && !sharingOfferHandled && !doNotDisturb && !globalSnoozeUntil
-  onSharingActiveChanged: {
-    sharingOfferHandled = sharingActive && (doNotDisturb || globalSnoozeUntil > 0)
-  }
-  onDoNotDisturbChanged: { if (doNotDisturb && sharingActive) sharingOfferHandled = true }
-  onGlobalSnoozeUntilChanged: { if (globalSnoozeUntil > 0 && sharingActive) sharingOfferHandled = true }
-  function dismissSharingOffer() { if (sharingActive) sharingOfferHandled = true }
-  function snoozeSharingOffer(seconds) {
-    if (!sharingOfferPending || [1800, 3600, 14400].indexOf(seconds) < 0) return
-    sharingOfferHandled = true
-    snoozeSource(globalKey, "", seconds, true)
-  }
+  // Persisted: nothing on screen says the desktop is quiet, so a reload must not lift it.
+  function saveQuiet() { saveSoon("quiet") }
 
   readonly property int gap: Style.space(6)
 
@@ -201,7 +99,7 @@ Item {
 
   function fullscreenOn(name) {
     var revision = hyprRevision
-    if (!stepsAside || !name) return false
+    if (!name) return false
     var screen = null
     for (var s = 0; s < Quickshell.screens.length; s++)
       if (String(Quickshell.screens[s].name) === name) screen = Quickshell.screens[s]
@@ -221,7 +119,6 @@ Item {
   Connections {
     target: Hyprland
     function onRawEvent(event) {
-      if (!service.stepsAside) return
       switch (event.name) {
       case "fullscreen": case "openwindow": case "closewindow": case "movewindowv2":
       case "activewindowv2": case "workspacev2": case "focusedmonv2": case "changefloatingmode":
@@ -252,244 +149,6 @@ Item {
     if (urgency === NotificationUrgency.Critical) return 0
     var base = urgency === NotificationUrgency.Low ? lowDuration : normalDuration
     return Math.min(maxDuration, Math.max(base, requested > 0 ? requested : 0))
-  }
-
-  // ------------------------------------------------------------- snooze
-  //
-  // Keyed by the row's group key: per site for browser notifications
-  // ("web:app.slack.com"), per app otherwise. Snoozed notifications are still recorded.
-  property var snoozes: ({})        // groupKey -> { until: epoch seconds, label, since }
-  property int snoozeRevision: 0
-
-  // Snoozing everything is the same mechanism under a key no source can have.
-  readonly property string globalKey: "*"
-  readonly property double globalSnoozeUntil: { snoozeRevision; return snoozedUntil(globalKey) }
-
-  function shortWords(minutes) {
-    if (minutes < 60) return I18n.t("notifications.minutesShort").arg(I18n.formatNumber(minutes))
-    var hours = Math.round(minutes / 6) / 10
-    return I18n.t("notifications.hoursShort").arg(I18n.formatNumber(hours, hours % 1 ? 1 : 0))
-  }
-
-  // One choice, worked out against the clock as it is now: "tomorrow" is a
-  // different number of seconds at every hour of the day.
-  function snoozeOption(choice) {
-    var value = String(choice || "")
-    var seconds = Settings.snoozeSeconds(value, Date.now())
-    if (!(seconds > 0)) return null
-    if (value === "tomorrow")
-      return { short: I18n.t("notifications.tomorrow"), seconds: seconds }
-    return { short: shortWords(Number(value)), seconds: seconds }
-  }
-
-  readonly property var snoozeOptions: {
-    var choices = Settings.SNOOZE_CHOICES, out = []
-    for (var i = 0; i < choices.length; i++) {
-      var option = snoozeOption(choices[i])
-      if (option) out.push(option)
-    }
-    return out
-  }
-
-  function snoozedUntil(groupKey) {
-    var entry = snoozes[String(groupKey || "")]
-    var until = entry ? Number(entry.until || 0) : 0
-    return until > Date.now() / 1000 ? until : 0
-  }
-
-  // Soonest to wake first, which is the order the panel lists them in.
-  function liveSnoozes() {
-    snoozeRevision
-    var now = Date.now() / 1000, out = []
-    for (var key in snoozes) {
-      if (key === globalKey) continue
-      var entry = snoozes[key]
-      if (!entry || Number(entry.until || 0) <= now) continue
-      out.push({ key: key, label: String(entry.label || key), until: Number(entry.until) })
-    }
-    out.sort(function(a, b) { return a.until - b.until })
-    return out
-  }
-
-  readonly property int snoozeCount: { snoozeRevision; return liveSnoozes().length }
-  readonly property bool anySnooze: snoozeCount > 0 || globalSnoozeUntil > 0
-
-  // Past a year is a mistake, and an infinite snooze would persist as null.
-  readonly property int maxSnoozeSeconds: 366 * 86400
-
-  // `fromNow` re-snoozes rather than extending what was already left.
-  function snoozeSource(groupKey, label, seconds, fromNow) {
-    var key = String(groupKey || "")
-    seconds = Number(seconds)
-    if (!key || !isFinite(seconds) || seconds <= 0) return 0
-    seconds = Math.min(seconds, maxSnoozeSeconds)
-    // Snoozing everything supersedes silencing: the same quiet, with an end.
-    if (key === globalKey) setDoNotDisturb(false)
-    var from = fromNow ? Date.now() / 1000
-                       : Math.max(Date.now() / 1000, snoozedUntil(key))
-    var next = {}
-    for (var k in snoozes) next[k] = snoozes[k]
-    // When this quiet period began, so the panel lists only what it held.
-    var since = (next[key] && snoozedUntil(key)) ? Number(next[key].since || 0)
-                                                 : Date.now() / 1000
-    next[key] = { until: from + seconds, label: String(label || key), since: since }
-    snoozes = next
-    snoozeRevision += 1
-    saveQuiet()
-    // Anything from that source already on screen goes now.
-    var keys = []
-    for (var i = 0; i < toasts.count; i++) {
-      var row = toasts.get(i)
-      if (key === globalKey ? !Delivery.bypassesQuiet(row) : String(row.groupKey || "") === key) keys.push(row.key)
-    }
-    for (var j = 0; j < keys.length; j++) closeToast(keys[j], "snoozed")
-    return next[key].until
-  }
-
-  function unsnooze(groupKey) {
-    var next = {}
-    for (var k in snoozes) if (k !== String(groupKey)) next[k] = snoozes[k]
-    snoozes = next
-    snoozeRevision += 1
-    saveQuiet()
-  }
-
-  function unsnoozeAll() {
-    snoozes = ({})
-    snoozeRevision += 1
-    saveQuiet()
-  }
-
-  // Persisted: nothing on screen says the desktop is quiet, so a reload must not lift it.
-  function saveQuiet() { saveSoon("quiet") }
-
-  // Wakes the bindings so a snooze that has run out stops being counted, and
-  // drops it from the map. Only runs while something is actually snoozed.
-  Timer {
-    interval: 20000
-    repeat: true
-    running: service.anySnooze
-    onTriggered: {
-      var now = Date.now() / 1000, next = {}, dropped = false
-      for (var k in service.snoozes) {
-        if (Number(service.snoozes[k].until || 0) > now) next[k] = service.snoozes[k]
-        else dropped = true
-      }
-      if (dropped) { service.snoozes = next; service.saveQuiet() }
-      service.snoozeRevision += 1
-    }
-  }
-
-  // ------------------------------------------------------------- recent
-  //
-  // Session-only text snapshots of what reached the screen, never live objects.
-  property var recentRows: []
-  readonly property int recentLimit: 20
-
-  function rememberRecent(row) {
-    var key = String(row.key), rows = []
-    if (!doNotDisturb && !globalSnoozeUntil && !snoozedUntil(row.groupKey)) {
-      // A digest keeps source matching apart from the redacted display text.
-      var sourceKey = Qt.md5(String(row.groupKey || ""))
-      row = Store.sanitiseForPersistence(row)
-      rows.push({
-        key: key, sourceKey: sourceKey,
-        source: String(row.source || row.app || "").slice(0, 120),
-        summary: String(row.summary || "").slice(0, 240),
-        bodyLine: String(row.bodyLine || "").slice(0, 1000),
-        ts: Number(row.ts)
-      })
-    }
-    // A replacement may move to a snoozed source: drop its old entry even when
-    // the new version belongs only in Held Back.
-    for (var i = 0; i < recentRows.length && rows.length < recentLimit; i++) {
-      if (recentRows[i].key !== key) rows.push(recentRows[i])
-    }
-    recentRows = rows
-  }
-
-  function recentForPanel(limit) {
-    snoozeRevision
-    if (doNotDisturb || globalSnoozeUntil) return []
-    var excluded = Object.create(null), snoozed = liveSnoozes()
-    for (var i = 0; i < snoozed.length; i++) excluded[Qt.md5(snoozed[i].key)] = true
-    var rows = []
-    for (var j = 0; j < recentRows.length && rows.length < limit; j++) {
-      if (!excluded[recentRows[j].sourceKey]) rows.push(recentRows[j])
-    }
-    return rows
-  }
-
-  // ------------------------------------------------------- what was held
-  //
-  // Drawn from history when the panel opens: what quiet kept off the screen.
-  property var heldRows: []
-  property int heldRevision: 0
-  readonly property int heldLimit: 80
-
-  function refreshHeld() {
-    heldRows = Store.displayRows(Store.held(currentHistory(), heldLimit))
-    heldRevision += 1
-  }
-
-  // ---------------------------------------------------- notification history
-  //
-  // The redacted log (see store below), newest first, read when the panel opens.
-  property var historyRows: []
-  property int historyRevision: 0
-
-  function refreshHistory() {
-    historyRows = Store.displayRows(currentHistory())
-    historyRevision += 1
-  }
-
-  // When the quiet holding this source began: the earliest of the reasons
-  // currently in force.
-  function quietSince(groupKey) {
-    var entry = snoozes[String(groupKey || "")]
-    var mine = entry && snoozedUntil(groupKey) ? Number(entry.since || 0) : 0
-    var global = globalSnoozeUntil ? Number((snoozes[globalKey] || {}).since || 0) : 0
-    var silence = doNotDisturb ? silencedSince : 0
-    var starts = [mine, global, silence].filter(function(t) { return t > 0 })
-    return starts.length ? Math.min.apply(null, starts) : 0
-  }
-
-  function heldFor(groupKey, limit) {
-    heldRevision
-    var since = quietSince(groupKey)
-    var out = []
-    for (var i = 0; i < heldRows.length && out.length < limit; i++) {
-      var row = heldRows[i]
-      if (String(row.groupKey || "") !== String(groupKey)) continue
-      if (since && Number(row.ts || 0) < since) continue
-      out.push(row)
-    }
-    return out
-  }
-
-  // Sources snoozed by name first, then (while everything is quiet) any other
-  // source that held something.
-  function quietSources(limit) {
-    snoozeRevision; heldRevision
-    var rows = [], seen = {}
-    var snoozed = liveSnoozes()
-    var i, key
-    for (i = 0; i < snoozed.length && rows.length < limit; i++) {
-      seen[snoozed[i].key] = true
-      rows.push({ key: snoozed[i].key, label: snoozed[i].label, until: snoozed[i].until,
-                  held: heldFor(snoozed[i].key, heldPerSource) })
-    }
-    if (!doNotDisturb && !globalSnoozeUntil) return rows
-    for (i = 0; i < heldRows.length && rows.length < limit; i++) {
-      key = String(heldRows[i].groupKey || "")
-      if (!key || seen[key]) continue
-      var held = heldFor(key, heldPerSource)
-      if (!held.length) continue
-      seen[key] = true
-      rows.push({ key: key, label: String(heldRows[i].source || heldRows[i].app || key),
-                  until: 0, held: held })
-    }
-    return rows
   }
 
   // ------------------------------------------------------------- state
@@ -743,7 +402,6 @@ Item {
 
     var row = Store.snapshot(notification, key, NotificationUrgency)
     row.duration = durationFor(notification.urgency, row.expireTimeout)
-    rememberRecent(row)
 
     var previous = refs[key]
     refs[key] = notification
@@ -754,12 +412,7 @@ Item {
     }
 
     // Quiet still records it (unless ephemeral), straight to history.
-    var muted = Delivery.quietReason(row, {
-      doNotDisturb: doNotDisturb,
-      globalSnoozed: globalSnoozeUntil > 0,
-      sourceSnoozed: snoozedUntil(row.groupKey) > 0,
-      codesBypassQuiet: codesBypassQuiet
-    })
+    var muted = Delivery.quietReason(row, doNotDisturb)
     if (muted) {
       if (!Delivery.isEphemeral(row)) storeRecord(row, muted)
       release(key)
@@ -1248,13 +901,13 @@ Item {
   // Straight to history: a row that closed, or one quiet kept off the screen.
   function storeRecord(row, reason) {
     var now = Date.now() / 1000
-    historyEntries = Store.addHistory(historyEntries, Store.closedEntry(row, reason, now), historyHours, now)
+    historyEntries = Store.addHistory(historyEntries, Store.closedEntry(row, reason, now), now)
     saveSoon("history")
   }
 
   // History as of now: rows past their retention go, from disk too.
   function currentHistory() {
-    var kept = Store.retain(historyEntries, historyHours, Date.now() / 1000)
+    var kept = Store.retain(historyEntries, Date.now() / 1000)
     if (kept.length !== historyEntries.length) {
       historyEntries = kept
       saveSoon("history")
@@ -1287,8 +940,7 @@ Item {
     }
     if (unsaved.quiet && quietLoaded) {
       delete unsaved.quiet
-      quietFile.setText(Store.serialiseQuiet({ snoozes: snoozes, dnd: doNotDisturb, silencedSince: silencedSince,
-                                               codesBypassQuiet: codesBypassQuiet }))
+      quietFile.setText(Store.serialiseQuiet({ dnd: doNotDisturb }))
     }
   }
 
@@ -1305,7 +957,7 @@ Item {
 
   function loadHistory(text) {
     if (historyLoaded) return
-    historyEntries = Store.retain(historyEntries.concat(Store.parseHistory(text)), historyHours, Date.now() / 1000)
+    historyEntries = Store.retain(historyEntries.concat(Store.parseHistory(text)), Date.now() / 1000)
     historyLoaded = true
     if (unsaved.history || Store.serialise(historyEntries) !== String(text)) saveSoon("history")
   }
@@ -1318,13 +970,9 @@ Item {
   function applyQuiet(read) {
     if (quietLoaded) return
     if (read) {
-      snoozes = read.snoozes
       doNotDisturb = read.dnd
-      silencedSince = read.silencedSince
-      if (read.codesBypassQuiet !== null) codesBypassQuiet = read.codesBypassQuiet
     }
     quietLoaded = true
-    snoozeRevision += 1
     if (unsaved.quiet) saveSoon("quiet")
   }
 
@@ -1430,35 +1078,6 @@ Item {
     showRow(row)
   }
 
-  // ------------------------------------------------------------- the panel
-  //
-  // The panel lives with the bar's indicator (one per monitor); requests go
-  // through here and the focused monitor's indicator answers.
-  signal panelRequested(string action, string screenName)
-  readonly property url panelUrl: Qt.resolvedUrl("NotificationPanel.qml")
-
-  // Tracked here because the indicator moves between separate bar instances
-  // as the quiet state changes.
-  property var openPanel: null
-  function notePanel(panel, opened) {
-    if (opened) {
-      if (openPanel && openPanel !== panel) openPanel.close()
-      openPanel = panel
-    } else if (openPanel === panel) {
-      openPanel = null
-    }
-  }
-
-  function requestPanel(action, screenName) {
-    var what = String(action || "toggle")
-    if (openPanel) {
-      if (what === "close" || what === "toggle") openPanel.close()
-      return "ok"
-    }
-    if (what !== "close") panelRequested(what, String(screenName || focusedDisplayName))
-    return "ok"
-  }
-
   // ------------------------------------------------------------- IPC
   //
   // Keybindings run these handlers directly as global shortcuts, with no client to spawn.
@@ -1535,21 +1154,15 @@ Item {
       return service.expanded ? "expanded" : "collapsed"
     }
 
-    function openPanel(): string { return service.requestPanel("open") }
-    function closePanel(): string { return service.requestPanel("close") }
 
     // What the daemon thinks is true, for scripts to check.
     function probe(): string {
       return JSON.stringify({ toasts: toasts.count,
         doNotDisturb: service.doNotDisturb, expanded: service.expanded,
-        sharingActive: service.sharingActive, sharingStreams: service.sharingStreams,
-        sharingOfferPending: service.sharingOfferPending, offerSnoozeWhenSharing: service.offerSnoozeWhenSharing,
-        globalSnoozeUntil: service.globalSnoozeUntil,
-        displayMode: service.displayMode, displayName: service.displayName,
         displays: service.displayNames, focusedDisplay: service.focusedDisplayName,
         targetDisplay: service.targetDisplayName,
         notificationDisplays: service.displayNames.filter(function(name) { return service.showsOn(name) }),
-        stepsAside: service.stepsAside, surfaces: service.surfaceStates() })
+        surfaces: service.surfaceStates() })
     }
   }
 
@@ -1708,11 +1321,6 @@ Item {
               onExpired: service.closeToast(model.key, "expired")
               onActivated: service.activate(model.key)
               onDismissed: service.closeToast(model.key, "dismissed")
-              snoozeOptions: service.snoozeOptions
-              onSnoozeRequested: function(seconds) {
-                service.snoozeSource(String(model.groupKey || ""),
-                                     String(model.source || model.app || ""), seconds)
-              }
             }
           }
         }

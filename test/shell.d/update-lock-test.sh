@@ -4,6 +4,8 @@ set -euo pipefail
 
 source "$(dirname "$0")/base-test.sh"
 
+require_command ps
+
 source "$SHELL_TEST_DIR/fixtures/sudo-boundary-test.sh"
 test_tmp="$boundary_tmp"
 stub_bin="$SUDO_TEST_ROOT/bin"
@@ -142,8 +144,13 @@ wait "$inhibit_update_pid"
 (( inhibitor_holds_lock == 0 )) || fail "update keeps the update lock out of the sleep inhibitor it leaves running"
 pass "omarchy-update keeps the update lock out of its sleep inhibitor"
 
-kill -0 "$inhibitor_pid" 2>/dev/null &&
-  fail "update waits for its sleep inhibitor to stop before continuing"
+# Container PID 1 may leave the stopped orphan as a zombie. It holds no
+# inhibitor or lock; require that it is gone or stopped, never still running.
+if inhibitor_state=$(ps -o stat= -p "$inhibitor_pid"); then
+  [[ $inhibitor_state == Z* ]] || fail "update waits for its sleep inhibitor to stop before continuing"
+elif kill -0 "$inhibitor_pid" 2>/dev/null; then
+  fail "sleep inhibitor state can be inspected"
+fi
 pass "omarchy-update waits for its sleep inhibitor to stop"
 
 if (( EUID != 0 )); then
